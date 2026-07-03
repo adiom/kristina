@@ -2,38 +2,37 @@
 
 ## Overview
 
-The memory system provides persistent storage with vector search capabilities. It uses a dual-namespace design to separate agent's own knowledge from knowledge about specific users.
+The memory system provides persistent storage with vector search capabilities using pgvector. It uses a **four-namespace design** to isolate agent knowledge, user knowledge, space knowledge, and service knowledge.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Memory Store                          │
-├─────────────────────────────────────────────────────────┤
-│                                                         │
-│  ┌─────────────────┐    ┌─────────────────┐             │
-│  │  Agent Memory   │    │  User Memory    │             │
-│  │  (userId=NULL)  │    │  (userId=<id>)  │             │
-│  │                 │    │                 │             │
-│  │ • insights      │    │ • preferences   │             │
-│  │ • patterns      │    │ • topics        │             │
-│  │ • knowledge     │    │ • style         │             │
-│  │ • decisions     │    │ • history       │             │
-│  └────────┬────────┘    └────────┬────────┘             │
-│           │                      │                      │
-│           └──────────────────────┘                      │
-│                          │                              │
-│                 ┌────────▼────────┐                      │
-│                 │  Vector Search  │                      │
-│                 │   (pgvector)    │                      │
-│                 └─────────────────┘                      │
-│                                                         │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                       Memory Store                           │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐    │
+│  │   Own    │  │   User   │  │   Space  │  │ Service  │    │
+│  │(userId=  │  │(userId=  │  │(spaceId= │  │(service= │    │
+│  │  NULL)   │  │  <id>)   │  │  <id>)   │  │  <id>)   │    │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘    │
+│       │             │             │             │           │
+│       └─────────────┼─────────────┼─────────────┘           │
+│                     │             │                         │
+│              ┌──────▼──────┐      │                         │
+│              │ Vector Search│     │                         │
+│              │  (pgvector)  │     │                         │
+│              └─────────────┘     │                         │
+│                                  │                         │
+│              ┌───────────────────▼──────────┐              │
+│              │     Secret Scanning Layer     │              │
+│              └──────────────────────────────┘              │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-## Dual-Namespace Design
+## Four-Namespace Design
 
-### Agent Memory (`userId = NULL`)
+### Own Memory (`userId = NULL`)
 Stores the agent's own knowledge:
 - **Insights** extracted from reflection
 - **Patterns** recognized in conversations
@@ -48,23 +47,32 @@ Stores knowledge about specific people:
 - **Style** — how they communicate
 - **History** — past interactions
 
+### Space Memory (`spaceId = <id>`)
+Stores knowledge scoped to a conversation space (sfera, chat, simulation):
+- Space-specific context and patterns
+- Cross-user knowledge within the space
+
+### Service Memory (`service = <id>`)
+Stores knowledge about a particular external service:
+- Service-specific behavior patterns
+- Integration-specific insights
+
 ## Memory Entry Structure
 
 ```typescript
-interface MemoryEntry {
-  id: string;
+interface StoreEntry {
   content: string;
   category: 'insight' | 'pattern' | 'knowledge' | 'decision' | 'reflection';
   importance: number; // 1-10
-  tags: string[];
-  context: {
-    channel: 'chat' | 'economic_sim' | 'reflection';
-    userId?: string;
+  tags?: string[];
+  userId?: string | null;
+  spaceId?: string | null;
+  service?: string | null;
+  context?: {
+    channel?: string;
     emotionalTone?: string;
     situation?: string;
   };
-  embedding: number[];
-  createdAt: Date;
 }
 ```
 
@@ -78,91 +86,127 @@ Uses pgvector cosine similarity:
 
 ### Search Query
 ```typescript
-async search(query: string, options: SearchOptions) {
-  const queryEmbedding = await this.embedding.generate(query);
-  
-  return this.db.execute(sql`
-    SELECT *, 
-      1 - (embedding <=> ${queryEmbedding}::vector) as similarity
-    FROM cf_kristina_memory
-    WHERE 
-      -- Namespace filtering
-      (${options.userId}::uuid IS NULL AND userId IS NULL)
-      OR (${options.userId}::uuid IS NOT NULL AND userId = ${options.userId}::uuid)
-      -- Category filtering
-      ${options.category ? sql`AND category = ${options.category}` : sql``}
-      -- Similarity threshold
-      AND 1 - (embedding <=> ${queryEmbedding}::vector) >= ${options.minSimilarity || 0.7}
-    ORDER BY embedding <=> ${queryEmbedding}::vector
-    LIMIT ${options.limit || 5}
-  `);
+async function searchMemory(query: string, options: SearchOptions) {
+  const queryEmbedding = await generateEmbedding(query);
+  const minSimilarity = options.minSimilarity || 0.7;
+  const limit = options.limit || 5;
+
+  const results = await db
+    .select({
+      id: memory.id,
+      content: memory.content,
+      category: memory.category,
+      importance: memory.importance,
+      tags: memory.tags,
+      userId: memory.userId,
+      spaceId: memory.spaceId,
+      service: memory.service,
+      context: memory.context,
+      createdAt: memory.createdAt,
+      similarity: sql<number>`1 - (${memory.embedding} <=> ${sql.raw(`'[${queryEmbedding.join(',')}]'::vector`)})`,
+    })
+    .from(memory)
+    .where(whereCondition)
+    .orderBy(sql`${memory.embedding} <=> ${sql.raw(`'[${queryEmbedding.join(',')}]'::vector`)}`)
+    .limit(limit);
+
+  return results.filter((r) => r.similarity >= minSimilarity);
 }
 ```
 
 ## Secret Scanning
 
-Before storing any memory entry, the system scans for:
-- API keys (patterns: `sk-*`, `key-*`, `token-*`)
-- Passwords (patterns: `password=`, `pwd=`)
-- Private keys (patterns: `BEGIN.*PRIVATE KEY`)
-- Environment variables (patterns: `${...}`, `$ENV`)
+Before storing any memory entry, the system scans for secrets using 8 regex patterns:
+- API keys (`sk-*`, `key-*`, `token-*`)
+- Passwords (`password=`, `pwd=`)
+- Private keys (`BEGIN.*PRIVATE KEY`)
+- Environment variables (`${...}`, `$ENV`)
 
-If secrets are detected, the entry is rejected and logged.
+If secrets are detected, the entry is rejected with an error.
 
-## Importance Scoring
+## String-to-UUID Conversion
 
-Memory entries are scored 1-10 based on:
-- **Relevance**: How relevant to current context
-- **Uniqueness**: How unique/novel the information
-- **Recency**: How recent the information
-- **Impact**: Potential impact on future interactions
+External services pass plain strings for `userId` and `spaceId`, but the database columns are typed as `uuid`. The system uses a deterministic UUIDv5 derivation (SHA-1 based) so the same input always maps to the same row:
+
+```typescript
+function stringToUuid(input: string): string {
+  const hash = createHash('sha1')
+    .update(NAMESPACE) // Fixed namespace UUID
+    .update(input)
+    .digest();
+  // Set version (5) and variant (10xx) bits per RFC 4122
+  // ... format as UUID string
+}
+```
 
 ## Embedding Generation
 
-Supports multiple providers:
-- **nomic-embed-text** (local, free, good quality)
-- **OpenAI text-embedding-3-small** (paid, better quality)
-- **Voyage AI** (paid, best quality)
+Uses local LM Studio endpoint with `text-embedding-nomic-embed-text-v1.5` (768-dim). Configurable via `EMBEDDING_MODEL` env variable.
 
-Default: nomic-embed-text for local development, OpenAI for production.
+```typescript
+async function generateEmbedding(text: string): Promise<number[]> {
+  const lmstudio = getLmStudio();
+  const embeddingModel = lmstudio.embeddingModel(
+    process.env.EMBEDDING_MODEL || 'text-embedding-nomic-embed-text-v1.5'
+  );
+  const { embedding } = await embed({ model: embeddingModel, value: text });
+  return embedding;
+}
+```
 
 ## API Methods
 
+Module-based functions (not class methods):
+
 ```typescript
-class MemoryStore {
-  // Store agent's own memory
-  async storeOwnMemory(entry: Omit<MemoryEntry, 'context'>): Promise<void>;
-  
-  // Store memory about a user
-  async storeUserMemory(userId: string, entry: Omit<MemoryEntry, 'context'>): Promise<void>;
-  
-  // Search agent's own memory
-  async searchOwnMemory(query: string, options?: SearchOptions): Promise<MemoryEntry[]>;
-  
-  // Search memory about a specific user
-  async searchUserMemory(userId: string, query: string, options?: SearchOptions): Promise<MemoryEntry[]>;
-  
-  // Generic search with namespace filtering
-  async search(query: string, options: SearchOptions): Promise<MemoryEntry[]>;
-  
-  // Delete memory entry
-  async delete(id: string): Promise<void>;
-  
-  // Update memory entry
-  async update(id: string, updates: Partial<MemoryEntry>): Promise<void>;
-}
+// Write helpers
+storeOwnMemory(entry: StoreEntry): Promise<void>
+storeUserMemory(userId: string, entry: StoreEntry): Promise<void>
+storeSpaceMemory(spaceId: string, entry: StoreEntry): Promise<void>
+storeServiceMemory(serviceId: string, entry: StoreEntry): Promise<void>
+
+// Read helpers
+searchOwnMemory(query: string, options?: SearchOptions): Promise<MemoryResult[]>
+searchUserMemory(userId: string, query: string, options?: SearchOptions): Promise<MemoryResult[]>
+searchSpaceMemory(spaceId: string, query: string, options?: SearchOptions): Promise<MemoryResult[]>
+searchServiceMemory(serviceId: string, query: string, options?: SearchOptions): Promise<MemoryResult[]>
+```
+
+## Database Schema
+
+```sql
+CREATE TABLE cf_kristina_memory (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  content TEXT NOT NULL,
+  category TEXT NOT NULL CHECK (category IN ('insight', 'pattern', 'knowledge', 'decision', 'reflection')),
+  importance INTEGER NOT NULL,
+  tags TEXT[] DEFAULT '{}',
+  user_id UUID,          -- NULL for agent's own memory
+  space_id UUID,         -- Scoped to conversation space
+  service TEXT,          -- Scoped to external service
+  context JSONB,
+  embedding VECTOR(768), -- pgvector 768-dim
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Indexes
+CREATE INDEX memory_user_id_idx ON cf_kristina_memory(user_id);
+CREATE INDEX memory_space_id_idx ON cf_kristina_memory(space_id);
+CREATE INDEX memory_service_idx ON cf_kristina_memory(service);
+CREATE INDEX memory_category_idx ON cf_kristina_memory(category);
+CREATE INDEX memory_created_at_idx ON cf_kristina_memory(created_at);
 ```
 
 ## Performance Considerations
 
-1. **Indexing**: Create HNSW index on embedding column
-2. **Batch operations**: Use transactions for bulk inserts
-3. **Connection pooling**: Use PgBouncer or Supabase pooler
-4. **Caching**: Cache frequent searches (Redis or in-memory)
+1. **Indexing**: Indexes on user_id, space_id, service, category, created_at
+2. **Similarity threshold**: Minimum 0.7 cosine similarity by default
+3. **Result limit**: Default 5 results per search
+4. **Embedding dimension**: 768 (nomic-embed-text)
 
 ## Testing
 
 - Unit tests for memory storage/retrieval
-- Integration tests for vector search accuracy
-- Load tests for search performance
-- Edge tests for secret scanning
+- Secret scanning tests (8 patterns)
+- Vector search accuracy tests
+- UUID deterministic conversion tests

@@ -1,67 +1,56 @@
 # PROGRESS.md — cf-kristina
 
-## Current Status: Planning Phase
+## Current Status: MVP Implemented
 
 ### Completed
 - [x] Architecture design documented
-- [x] Core components defined
-- [x] Database schema designed
-- [x] Tech stack selected (Next.js + Vercel)
+- [x] Core components defined and implemented
+- [x] Database schema designed and migrated
+- [x] Tech stack selected (Next.js 16 + LM Studio)
+- [x] Memory system (4-namespace, pgvector, secret-scan)
+- [x] Reflection cycle (topic selection, LLM reasoning, insight extraction)
+- [x] Interest system (add, grow, decay, cross-pollinate, archive)
+- [x] Personality system (8 traits, DB-backed with history)
+- [x] Transparency system (buffered writes, activity log)
+- [x] Dashboard data aggregation and UI
+- [x] HTTP transport (POST /api/agent)
+- [x] MCP transport (POST /api/mcp)
+- [x] Test chat UI
+- [x] Policy layer (validation, rate limiting, access control)
+- [x] ProcessAgent tests
+- [x] Policy tests
+
+### Implemented Components
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Agent Core | Done | processAgent entry point |
+| Memory Store | Done | 4-namespace, pgvector, secret-scan |
+| Reflection | Done | Manual + topic selection |
+| Interests | Done | Full lifecycle |
+| Personality | Done | 8 traits, trend analysis |
+| Transparency | Done | Buffered writes |
+| Dashboard | Done | Stats, memories, interests, traits, activity |
+| HTTP API | Done | POST /api/agent |
+| MCP API | Done | POST /api/mcp |
+| Policy | Done | Validation, rate limiting |
 
 ### In Progress
-- [ ] Project initialization
-- [ ] Database schema implementation
-- [ ] Memory system core
+- [ ] Scheduled reflection triggers (cron/scheduler)
+- [ ] Interest auto-generation from memory analysis
 
 ### Next Steps
 
-#### Phase 1: Foundation (Week 1)
-1. Initialize Next.js project
-2. Set up Drizzle + PostgreSQL connection
-3. Implement database schema
-4. Create basic API routes
+#### Phase 7: Planned Features
+1. Implement ATMv0 Client for economic simulations
+2. Add WebSocket for real-time dashboard updates
+3. Implement MCP Server for Sfera integration
+4. Add scheduled reflection triggers
 
-#### Phase 2: Memory System (Week 2)
-1. Implement Memory Store with dual-namespace
-2. Add vector search via pgvector
-3. Create memory tools for AI
-4. Test memory search accuracy
-
-#### Phase 3: Agent Core (Week 3)
-1. Implement Context Manager
-2. Create IsolatedContext system
-3. Build LLM integration (Claude)
-4. Test basic conversation flow
-
-#### Phase 4: Reflection System (Week 4)
-1. Implement Reflection Cycle
-2. Create interest generation
-3. Build interest evolution (decay/growth)
-4. Test reflection triggers
-
-#### Phase 5: Personality (Week 5)
-1. Implement core personality prompt
-2. Add dynamic traits system
-3. Create emotional state tracking
-4. Test personality consistency
-
-#### Phase 6: Channels (Week 6)
-1. Implement MCP Server for Sfera
-2. Create ATMv0 Client
-3. Test integration with Avrora
-4. Test economic simulation connection
-
-#### Phase 7: Transparency (Week 7)
-1. Implement activity logging
-2. Create dashboard UI
-3. Add real-time WebSocket updates
-4. Test transparency features
-
-#### Phase 8: Polish & Deploy (Week 8)
+#### Phase 8: Polish & Deploy
 1. Optimize performance
 2. Add error handling
 3. Deploy to Vercel
-4. Documentation
+4. Documentation improvements
 
 ---
 
@@ -77,29 +66,15 @@
 - **Reason**: Fast deployment, good DX, serverless
 - **Impact**: Need to handle WebSocket differently (Vercel doesn't support persistent WS)
 
-### 2026-07-03: Dual-Namespace Memory
-- **Decision**: userId=NULL for agent's own memory, userId=<id> for user-specific
+### 2026-07-03: Four-Namespace Memory
+- **Decision**: own, user, space, service namespaces
 - **Reason**: Clean separation, no cross-contamination
 - **Impact**: Need careful query design, index optimization
 
----
-
-## Open Questions
-
-1. **WebSocket for real-time dashboard?** Vercel doesn't support persistent WS. Options:
-   - Use Vercel KV (Redis) for pub/sub
-   - Use Server-Sent Events (SSE)
-   - Use polling for MVP
-
-2. **Embedding model?** Options:
-   - nomic-embed-text (local, free)
-   - OpenAI text-embedding-3-small (paid, better quality)
-   - Voyage AI (paid, best quality)
-
-3. **LLM provider?** Options:
-   - Claude (Anthropic) — best for reasoning
-   - GPT-4o (OpenAI) — good for function calling
-   - Multi-provider — more complex but flexible
+### 2026-07-03: Local LLM
+- **Decision**: LM Studio with qwen/qwen3-1.7b
+- **Reason**: No external API keys needed, fast iteration
+- **Impact**: Limited model capability for complex reasoning
 
 ---
 
@@ -107,14 +82,15 @@
 
 | Milestone | Target Date | Status |
 |-----------|-------------|--------|
-| Project initialized | 2026-07-05 | Pending |
-| Database schema live | 2026-07-07 | Pending |
-| Memory search working | 2026-07-10 | Pending |
-| Basic conversation flow | 2026-07-14 | Pending |
-| Reflection cycle complete | 2026-07-21 | Pending |
-| MCP integration | 2026-07-28 | Pending |
-| Dashboard MVP | 2026-08-04 | Pending |
-| Vercel deployment | 2026-08-11 | Pending |
+| Project initialized | 2026-07-05 | Done |
+| Database schema live | 2026-07-07 | Done |
+| Memory search working | 2026-07-10 | Done |
+| Basic conversation flow | 2026-07-14 | Done |
+| Reflection cycle complete | 2026-07-21 | Done |
+| MCP integration | 2026-07-28 | Done |
+| Dashboard MVP | 2026-08-04 | Done |
+| ATMv0 integration | TBD | Planned |
+| Vercel deployment | TBD | Planned |
 
 ---
 
@@ -133,8 +109,10 @@
 - User's own protocol for agent↔environment communication
 - Spec: `https://raw.githubusercontent.com/adiom/ATMv0/refs/heads/main/ATMv0.md`
 - Key features: intent-based actions, tick-based simulation, JSONL messages
+- Status: **Planned** — not yet implemented
 
 ### MCP Protocol
 - Model Context Protocol for external tool integration
 - Used for connecting to Avrora Sfera
-- Server listens on configurable port
+- Web transport via `/api/mcp`, standalone stdio via `src/mcp/server.ts`
+- Tools: agent_message, agent_search, agent_info

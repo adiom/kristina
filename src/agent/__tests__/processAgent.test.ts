@@ -31,6 +31,11 @@ jest.mock('@ai-sdk/openai-compatible', () => {
   return { createOpenAICompatible: () => callable };
 });
 
+jest.mock('@ai-sdk/groq', () => {
+  const callable: any = (modelId: string) => ({ modelId });
+  return { createGroq: () => callable };
+});
+
 jest.mock('../../memory/store', () => ({
   searchOwnMemory: jest.fn(async () => []),
   searchUserMemory: jest.fn(async () => []),

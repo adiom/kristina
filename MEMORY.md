@@ -23,36 +23,83 @@ An autonomous AI agent that:
 - **MVP approach**: Start simple, add complexity as needed
 
 ### Key Design Decisions
-1. **Dual-namespace memory**: Agent's own knowledge vs. knowledge about people
-2. **Context isolation**: No cross-user data leakage
-3. **Interest-driven exploration**: Agent自主地探索感兴趣的话题
+1. **Four-namespace memory**: own, user, space, service
+2. **Context isolation**: memoryAccess flags prevent cross-user/space/service leakage
+3. **Interest-driven exploration**: Agent explores topics autonomously
 4. **Transparency first**: All reasoning visible to operators
 
 ## Technical Context
 
 ### Stack
-- **Next.js 14+** (App Router)
-- **PostgreSQL + pgvector** (Supabase or Neon)
+- **Next.js 16** (App Router)
+- **PostgreSQL + pgvector** (768-dim embeddings)
 - **Drizzle ORM**
-- **Claude API** (Anthropic)
-- **Vercel AI SDK**
-- **MCP SDK** (@modelcontextprotocol/sdk)
-- **ATMv0** (WebSocket)
+- **LM Studio** (local OpenAI-compatible endpoint)
+- **Vercel AI SDK** (`ai` + `@ai-sdk/openai-compatible`)
+- **MCP SDK** (`@modelcontextprotocol/sdk`)
+- **Jest + ts-jest** (testing)
+- **ATMv0** (WebSocket) [planned]
 
 ### Database Tables
-- `cf_kristina_memory` — Memory entries with vector embeddings
+- `cf_kristina_memory` — Memory entries with 768-dim vector embeddings
 - `cf_kristina_interests` — Interest scores and metadata
-- `cf_kristina_traits` — Personality traits with history
-- `cf_kristina_activity_log` — Transparency logging
+- `cf_kristina_traits` — Personality traits with history (last 50)
+- `cf_kristina_activity_log` — Transparency logging (buffered writes)
 - `cf_kristina_diary` — Reflection diary entries
 
 ### API Routes
-- `/api/chat` — Handle chat messages
-- `/api/memory` — CRUD for memories
-- `/api/reflection` — Trigger reflection
-- `/api/interests` — Manage interests
-- `/api/dashboard` — Dashboard data
-- `/api/mcp` — MCP server endpoint
+- `/api/agent` — HTTP POST (main transport)
+- `/api/mcp` — MCP JSON-RPC POST
+- `/api/dashboard` — Dashboard data GET
+- `/dashboard` — Dashboard UI
+- `/chat` — Test chat UI
+
+## Implemented Features
+
+### Core Agent
+- `processAgent()` — Single entry point for all transports
+- Policy layer (validation, rate limiting, memory access control)
+- LLM via LM Studio (qwen/qwen3-1.7b)
+
+### Memory System
+- 4-namespace memory store (own/user/space/service)
+- pgvector 768-dim embeddings
+- Secret scanning (8 regex patterns)
+- String-to-UUID deterministic conversion (UUIDv5)
+- Vector similarity search (min 0.7 cosine similarity)
+
+### Reflection System
+- Topic selection (weighted random from top 5 interests)
+- Insight extraction via regex (`ИНСАЙТ:`)
+- Reflection diary storage
+- Interest growth after reflection (+0.5)
+
+### Interest System
+- Add/grow/decay/cross-pollinate/archive lifecycle
+- Linear decay (0.1 * floor(days/7))
+- PostgreSQL similarity() for related interests
+
+### Personality System
+- 8 default traits (Russian names)
+- DB-backed with history (last 50 entries)
+- Trait trend analysis (growing/declining/stable)
+
+### Transparency System
+- Buffered writes (max 50 events, 5s flush)
+- Activity log with 9 event types
+- Stats aggregation by type and channel
+- Dashboard with memories, interests, traits, reflections, activity
+
+### Transports
+- HTTP POST `/api/agent`
+- MCP JSON-RPC POST `/api/mcp` (tools: agent_message, agent_search, agent_info)
+
+## Planned Features
+- ATMv0 Client for economic simulations
+- WebSocket real-time dashboard updates
+- Sfera MCP integration
+- Scheduled reflection triggers
+- Interest auto-generation from memory analysis
 
 ## Memory of Previous Sessions
 
@@ -72,17 +119,6 @@ An autonomous AI agent that:
 - `economic_simulation` — Agent-based economic modeling
 - `personality_engine` — Dynamic personality systems
 - `transparency_ai` — Explainable AI systems
-
-## Open Questions
-1. Which embedding model to use? (nomic-embed-text vs OpenAI)
-2. How to handle WebSocket on Vercel? (SSE vs polling)
-3. Multi-provider LLM or single provider?
-
-## Next Actions
-1. Initialize Next.js project
-2. Set up database connection
-3. Implement memory schema
-4. Create basic API routes
 
 ---
 

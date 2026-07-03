@@ -16,6 +16,7 @@
 
 import { ToolLoopAgent, tool } from 'ai';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
+import { createGroq } from '@ai-sdk/groq';
 import { z } from 'zod';
 import { CEO_PERSONALITY } from './personality';
 import type { AgentContext, AgentResult } from './types';
@@ -37,12 +38,25 @@ import {
   checkRateLimit,
 } from '../policy';
 
-const lmstudio = createOpenAICompatible({
-  name: 'lmstudio',
-  baseURL: process.env.LM_STUDIO_URL || 'http://localhost:1234/v1',
-});
+// Provider selection: GROQ (cloud, faster, larger models) or LM Studio (local)
+const provider = process.env.LLM_PROVIDER || 'lmstudio';
 
-const model = lmstudio('qwen/qwen3-1.7b');
+function getModel() {
+  if (provider === 'groq') {
+    const groq = createGroq({
+      apiKey: process.env.GROQ_API_KEY,
+    });
+    return groq('qwen/qwen3-32b');
+  }
+  // Default: LM Studio (local)
+  const lmstudio = createOpenAICompatible({
+    name: 'lmstudio',
+    baseURL: process.env.LM_STUDIO_URL || 'http://localhost:1234/v1',
+  });
+  return lmstudio('qwen/qwen3-1.7b');
+}
+
+const model = getModel();
 
 /**
  * The agent tool that the LLM can call.  We keep the tools minimal
@@ -186,6 +200,15 @@ async function retrieveMemory(
     );
   }
 
+  // Deduplicate by content — same memory may exist in multiple namespaces
+  const seen = new Set<string>();
+  const unique = results.filter((m) => {
+    const key = m.content.trim().toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
   await logActivity({
     type: 'memory_searched',
     channel: context.source,
@@ -193,11 +216,12 @@ async function retrieveMemory(
       serviceId: context.serviceId,
       spaceId: context.spaceId,
       userId: context.userId,
-      count: results.length,
+      count: unique.length,
+      duplicatesRemoved: results.length - unique.length,
     },
   });
 
-  return results;
+  return unique;
 }
 
 function buildSystemPrompt(context: AgentContext): string {
@@ -320,17 +344,26 @@ export async function processAgent(
   // (the LLM does not need to call any tool for the MVP – everything it
   // needs is in front of it).  We still keep the tool definitions in
   // case a future model chooses to call them.
+  // Limit to 3 snippets — small models (1.7B) get confused by too much context.
   const memorySnippet = memories
-    .map(
-      (m) =>
-        `- [${m.source}/${m.category}] (sim=${m.similarity.toFixed(2)}) ${m.content}`,
-    )
+    .slice(0, 3)
+    .map((m) => `- ${m.content}`)
     .join('\n');
 
   const fullPrompt = `${prompt}
 
-## Retrieved Memory
-${memorySnippet || '(no relevant memory)'}`;
+## Retrieved Memory (используй ТОЛЬКО если directly relevant к вопросу)
+${memorySnippet || '(no relevant memory)'}
+
+## ВАЖНО
+- Отвечай на вопрос пользователя, а не на содержимое памяти
+- Память — это контекст, а не ответ
+- Если вопрос про "что видишь" — опиши текущую ситуацию/контекст, а не facts из памяти`;
+
+  console.log('=== LLM DEBUG ===');
+  console.log('System Prompt:\n', systemPrompt);
+  console.log('Full Prompt:\n', fullPrompt);
+  console.log('================');
 
   const agent = new ToolLoopAgent({
     model,
@@ -353,7 +386,8 @@ ${memorySnippet || '(no relevant memory)'}`;
       similarity: m.similarity,
     })),
     metadata: {
-      model: 'qwen/qwen3-1.7b',
+      model: provider === 'groq' ? 'qwen/qwen3-32b' : 'qwen/qwen3-1.7b',
+      provider,
       serviceId: context.serviceId,
       spaceId: context.spaceId,
     },

@@ -11,81 +11,90 @@
 
 ### Key Characteristics
 - **Persistent memory** — помнит все разговоры и инсайты
-- **Dual-namespace memory** — общая память агента (`userId=NULL`) + память о конкретных людях (`userId=<id>`)
-- **Context isolation** — каждый диалог изолирован, нет утечек данных между пользователями
+- **Four-namespace memory** — общая память агента (`own`, `userId=NULL`) + память о людях (`user`, `userId=<id>`) + память пространства (`space`, `spaceId=<id>`) + память сервиса (`service`)
+- **Context isolation** — каждый вызов изолирован через `memoryAccess`‑флаги; нет утечек данных между пользователями/пространствами/сервисами
+- **Policy layer** — валидация контекста, проверка доступа к namespace, запрет записи, per‑service rate limiting (token bucket)
 - **Self-reflection** — фоновый процесс рефлексии, извлекающий инсайты из памяти
 - **Interest-driven exploration** — интересы формируются из памяти, эволюционируют через decay/growth
 - **Dynamic personality** — черты личности хранятся в БД с историей изменений
-- **Transparency** — все действия агента логируются и видны на дашборде
+- **Transparency** — все действия агента логируются в `activity_log` и видны на дашборде
 
 ## Tech Stack
-- **Runtime**: Next.js 14+ (App Router)
-- **Database**: PostgreSQL + pgvector (Supabase или Neon)
-- **ORM**: Drizzle
-- **LLM**: Claude (Anthropic) через Vercel AI SDK
-- **Embeddings**: nomic-embed-text (local) или OpenAI
-- **MCP Server**: @modelcontextprotocol/sdk
-- **ATMv0 Client**: ws (WebSocket)
-- **UI**: React + Tailwind + Radix UI
+- **Runtime**: Next.js 16 (App Router), React 19
+- **Database**: PostgreSQL + pgvector (768‑dim embeddings)
+- **ORM**: Drizzle (`drizzle-orm` + `drizzle-kit`, `pg` driver)
+- **LLM**: локальный OpenAI‑compatible endpoint через LM Studio (`@ai-sdk/openai-compatible` + Vercel AI SDK `ai`). Модель по умолчанию — `qwen/qwen3-1.7b`
+- **Embeddings**: локальная модель через тот же LM Studio endpoint (768‑dim)
+- **MCP Server**: `@modelcontextprotocol/sdk` (JSON‑RPC 2.0) — web transport via `src/app/api/mcp/route.ts`, standalone stdio via `src/mcp/server.ts`
+- **Validation**: `zod`
+- **UI**: React + Tailwind CSS v4
+- **Testing**: Jest + ts-jest
 - **Deployment**: Vercel (MVP)
-- **Local dev**: localhost:3000
+- **Local dev**: `localhost:31337`
 
 ## Project Structure
 ```
 cf-kristina/
 ├── src/
-│   ├── agent/           # Ядро агента
-│   ├── memory/          # Система памяти
+│   ├── agent/           # Ядро агента: processAgent, types, version, personality
+│   │   └── __tests__/   # Тесты processAgent
+│   ├── memory/          # Система памяти (4 namespace, pgvector, secret‑scan)
 │   ├── reflection/      # Саморефлексия
 │   ├── interests/       # Система интересов
 │   ├── personality/     # Личность
-│   ├── channels/        # Каналы (MCP, ATMv0)
-│   ├── transparency/    # Прозрачность
-│   └── db/              # Схема БД
-├── dashboard/           # UI дашборда
-├── app/                 # Next.js App Router
-└── docs/                # Документация
+│   ├── policy/          # Политика доступа: валидация, access‑флаги, rate limit
+│   │   └── __tests__/   # Тесты policy
+│   ├── mcp/             # MCP server helper
+│   ├── transparency/    # Прозрачность (activity_log)
+│   ├── dashboard/       # Агрегация данных для дашборда
+│   ├── db/              # Схема БД + миграции Drizzle
+│   └── app/             # Next.js App Router
+│       ├── api/agent/   # HTTP‑транспорт  POST /api/agent
+│       ├── api/mcp/     # MCP‑транспорт   POST /api/mcp
+│       ├── api/dashboard/ # Данные дашборда
+│       ├── dashboard/   # UI дашборда
+│       └── chat/        # Тестовый чат‑UI
+└── docs/                # Документация систем + opencode-integration.md
 ```
 
 ## Common Commands
 ```bash
 # Dev
-pnpm dev              # Start Next.js dev server
+pnpm dev              # Start Next.js dev server on http://localhost:31337
 pnpm build            # Build for production
-pnpm lint             # Run linter
+pnpm start            # Start production server
+pnpm lint             # Run ESLint
 
 # Database
 pnpm db:generate      # Generate Drizzle migrations
 pnpm db:migrate       # Apply migrations
+pnpm db:push          # Push schema directly (dev)
 pnpm db:studio        # Open Drizzle Studio
 
 # Testing
-pnpm test             # Run tests
+pnpm test             # Run Jest tests
 pnpm test:watch       # Watch mode
 ```
 
 ## Environment Variables
 ```env
-# Database
+# Database (PostgreSQL + pgvector)
 DATABASE_URL=postgresql://...
 
-# LLM
-ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...  # For embeddings
-
-# MCP
-MCP_SERVER_PORT=3001
-
-# ATMv0
-ATM_SERVER_URL=ws://localhost:8080
+# LLM + Embeddings (local OpenAI-compatible endpoint, e.g. LM Studio)
+LM_STUDIO_URL=http://localhost:1234/v1
 ```
 
+> Значения по умолчанию: LLM `qwen/qwen3-1.7b`, embeddings 768‑dim через тот же
+> endpoint. Внешние облачные ключи (Anthropic/OpenAI) в текущем MVP не требуются.
+
 ## Important Patterns
-1. **Dual-namespace memory**: `userId=NULL` for agent's own knowledge, `userId=<id>` for user-specific
-2. **Context isolation**: each conversation gets its own `IsolatedContext`
-3. **Reflection cycle**: scheduled triggers → select topic → explore → extract insights → update interests
-4. **Interest evolution**: decay (7d), growth (3d), cross-pollination, archive (below threshold 2 for 30d)
-5. **Transparency**: all actions logged to `activity_log` table with real-time WebSocket stream
+1. **Four-namespace memory**: `own` (userId=NULL), `user` (userId=<id>), `space` (spaceId=<id>), `service` (service=<id>)
+2. **Context isolation**: each call uses `AgentContext` with `memoryAccess` flags — no cross-user/space/service data leakage
+3. **Reflection cycle**: select topic → search memory → LLM reasoning → extract insights (`ИНСАЙТ:` regex) → store → update interests
+4. **Interest evolution**: linear decay (`DECAY_RATE * floor(days/7)`), growth (+0.5), cross-pollination (+0.2), archive (below threshold 2 for 30d)
+5. **Transparency**: buffered writes (max 50 events or 5s flush) to `activity_log` table; dashboard via `/api/dashboard`
+6. **Reflection diary**: `cf_kristina_diary` table stores topic, reflection text, and insights count per cycle
 
 ## File Naming Conventions
 - Components: `kebab-case.tsx`

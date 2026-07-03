@@ -12,17 +12,9 @@ The reflection system enables the agent to learn from its experiences through sc
 ├─────────────────────────────────────────────────────────┤
 │                                                         │
 │  ┌─────────────┐                                        │
-│  │   Trigger    │                                        │
-│  │  (scheduled │                                        │
-│  │   or interest│                                        │
-│  │   driven)   │                                        │
+│  │   Select    │                                        │
+│  │   Topic     │                                        │
 │  └──────┬──────┘                                        │
-│         │                                               │
-│         ▼                                               │
-│  ┌─────────────┐    ┌─────────────┐                     │
-│  │   Select    │◄───│  Interests  │                     │
-│  │   Topic     │    │   System    │                     │
-│  └──────┬──────┘    └─────────────┘                     │
 │         │                                               │
 │         ▼                                               │
 │  ┌─────────────┐    ┌─────────────┐                     │
@@ -51,135 +43,174 @@ The reflection system enables the agent to learn from its experiences through sc
 └─────────────────────────────────────────────────────────┘
 ```
 
-## Triggers
+## Reflection Prompt
 
-### 1. Scheduled Trigger
-- **Frequency**: Every 30 minutes
-- **Condition**: Always runs (if agent is active)
-- **Priority**: Low
+The agent uses a Russian-language prompt for reflection:
 
-### 2. Interest-Driven Trigger
-- **Frequency**: Checked every 5 minutes
-- **Condition**: Any interest score > 7.0
-- **Priority**: Medium
-
-### 3. Manual Trigger
-- **Frequency**: On-demand
-- **Condition**: User/operator requests reflection
-- **Priority**: High
-
-## Topic Selection
-
-Topics are selected based on interest scores:
 ```typescript
-async selectTopic(): Promise<string> {
-  const interests = await this.interests.getTopInterests(5);
-  
-  // Weighted random selection
-  const totalScore = interests.reduce((sum, i) => sum + i.score, 0);
-  const random = Math.random() * totalScore;
-  
-  let cumulative = 0;
-  for (const interest of interests) {
-    cumulative += interest.score;
-    if (random <= cumulative) {
-      return interest.topic;
-    }
-  }
-  
-  return interests[0].topic;
-}
+const REFLECTION_PROMPT = `Ты — Кристина, AI-агент с постоянной памятью.
+Твоя задача — провести рефлексию над выбранной темой на основе своих воспоминаний.
+
+Проанализируй воспоминания и извлеки:
+1. Ключевые инсайты (что нового ты узнала)
+2. Паттерны (что повторяется)
+3. Выводы (что стоит запомнить)
+
+Формат ответа:
+ИНСАЙТ: <текст инсайта> [важность: 1-10] [теги: tag1, tag2]
+ИНСАЙТ: <текст инсайта> [важность: 1-10] [теги: tag1, tag2]
+
+Будь краткой и конкретной.`;
 ```
 
 ## Reflection Cycle Steps
 
 ### Step 1: Select Topic
-- Get top interests by score
-- Weighted random selection
-- Log selection
+If no topic provided, selects via weighted random from top 5 interests:
+```typescript
+async function selectTopic(): Promise<string> {
+  const topInterests = await db.select().from(interests)
+    .orderBy(desc(interests.score)).limit(5);
+
+  if (topInterests.length === 0) return 'общие наблюдения';
+
+  const totalScore = topInterests.reduce(
+    (sum, i) => sum + parseFloat(i.score), 0
+  );
+  const random = Math.random() * totalScore;
+
+  let cumulative = 0;
+  for (const interest of topInterests) {
+    cumulative += parseFloat(interest.score);
+    if (random <= cumulative) return interest.topic;
+  }
+  return topInterests[0].topic;
+}
+```
 
 ### Step 2: Search Memory
-- Search for memories related to topic
-- Get top 5-10 most relevant memories
-- Include recent memories (last 7 days)
+Searches own memory for topic-related entries:
+```typescript
+const memories = await searchOwnMemory(topic, { limit: 10 });
+```
 
 ### Step 3: LLM Reasoning
+Uses `createAgent()` from agent core to generate reflection:
 ```typescript
-const reflection = await this.brain.reason({
-  systemPrompt: REFLECTION_SYSTEM_PROMPT,
-  message: `Исследуй тему: ${topic}. 
-    Используй следующие воспоминания:
-    ${memories.map(m => `- ${m.content}`).join('\n')}
-    
-    Извлеки инсайты и паттерны.`,
-  tools: ['searchOwnMemory', 'storeOwnMemory']
-});
+const agent = createAgent();
+const result = await agent.generate({ prompt });
+const reflectionText = result.text;
 ```
 
 ### Step 4: Extract Insights
-- Parse LLM response
-- Identify key insights
-- Score importance (6-8 for reflection insights)
-- Generate tags
+Parses LLM response using regex pattern `ИНСАЙТ:`:
+```typescript
+function extractInsights(text: string) {
+  const insights = [];
+  const lines = text.split('\n');
+
+  for (const line of lines) {
+    const match = line.match(
+      /ИНСАЙТ:\s*(.+?)(?:\s*\[важность:\s*(\d+)\])?(?:\s*\[теги:\s*(.+?)\])?/i
+    );
+    if (match) {
+      insights.push({
+        content: match[1].trim(),
+        importance: parseInt(match[2] || '6'), // Default importance: 6
+        tags: match[3] ? match[3].split(',').map(t => t.trim()) : [],
+      });
+    }
+  }
+  return insights;
+}
+```
 
 ### Step 5: Store Insights
+Each insight is stored as a `reflection` category memory:
 ```typescript
 for (const insight of insights) {
-  await this.memory.storeOwnMemory({
-    content: insight,
+  await storeOwnMemory({
+    content: insight.content,
     category: 'reflection',
     importance: insight.importance,
-    tags: ['reflection', topic],
-    context: { channel: 'reflection', topic }
+    tags: ['reflection', topic, ...insight.tags],
+    context: { channel: 'reflection', situation: topic },
   });
 }
 ```
 
 ### Step 6: Write Diary
+Stores the full reflection in the diary table:
 ```typescript
-await this.diary.write({
+await db.insert(diary).values({
   topic,
-  reflection,
-  insights: insights.length,
-  timestamp: new Date()
+  reflection: reflectionText,
+  insightsCount: insights.length,
 });
 ```
 
 ### Step 7: Update Interests
+The explored interest grows (+0.5), and related interests are cross-pollinated (+0.2):
 ```typescript
-// Interest that was explored grows
-await this.interests.explore(topic);
+async function updateInterests(topic: string) {
+  const existing = await db.select().from(interests)
+    .where(eq(interests.topic, topic)).limit(1);
 
-// Related interests get cross-pollination
-const related = await this.interests.findRelated(topic);
-for (const r of related) {
-  await this.interests.crossPollinate(r.topic, topic);
+  if (existing.length > 0) {
+    const newScore = Math.min(10, parseFloat(existing[0].score) + 0.5);
+    await db.update(interests).set({
+      score: newScore.toString(),
+      lastExplored: new Date(),
+    }).where(eq(interests.topic, topic));
+  } else {
+    await db.insert(interests).values({
+      topic,
+      score: '6.00',
+      priority: 3,
+      source: 'reflection',
+      lastExplored: new Date(),
+    });
+  }
 }
 ```
 
 ## Reflection Diary
 
 Stores reflection session outputs:
+```sql
+CREATE TABLE cf_kristina_diary (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  topic TEXT NOT NULL,
+  reflection TEXT NOT NULL,
+  insights_count INTEGER DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX diary_created_at_idx ON cf_kristina_diary(created_at);
+```
+
+### Read Diary Entries
 ```typescript
-interface DiaryEntry {
-  id: string;
-  topic: string;
-  reflection: string;
-  insightsCount: number;
-  createdAt: Date;
+async function getDiaryEntries(limit = 10) {
+  return db.select().from(diary)
+    .orderBy(desc(diary.createdAt))
+    .limit(limit);
 }
 ```
 
-## Performance Considerations
+## API
 
-1. **Throttling**: Max 1 reflection per 10 minutes
-2. **Queue**: Use Redis queue for reflection jobs
-3. **Batch processing**: Process multiple interests in one cycle
-4. **Caching**: Cache reflection results for frequently explored topics
+```typescript
+// Run a full reflection cycle (optionally with a specific topic)
+runReflection(topic?: string): Promise<ReflectionResult>
+
+// Read diary entries
+getDiaryEntries(limit?: number): Promise<DiaryEntry[]>
+```
 
 ## Testing
 
-- Unit tests for topic selection
-- Integration tests for full reflection cycle
-- Load tests for concurrent reflections
-- Edge tests for interest thresholds
+- Topic selection tests (weighted random)
+- Insight extraction regex tests
+- Diary write/read tests
+- Interest update tests after reflection

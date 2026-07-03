@@ -12,15 +12,15 @@ The transparency system logs all agent actions and provides a dashboard for oper
 ├─────────────────────────────────────────────────────────┤
 │                                                         │
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐  │
-│  │  Activity   │    │  Reasoning  │    │  Dashboard  │  │
-│  │    Log      │    │    Log      │    │     UI      │  │
+│  │  Activity   │    │  Dashboard  │    │   Stats     │  │
+│  │    Log      │    │     UI      │    │   API       │  │
 │  └──────┬──────┘    └──────┬──────┘    └──────┬──────┘  │
 │         │                  │                  │         │
 │         └──────────────────┼──────────────────┘         │
 │                            │                            │
 │                    ┌───────▼───────┐                    │
-│                    │   WebSocket   │                    │
-│                    │  (real-time)  │                    │
+│                    │  PostgreSQL   │                    │
+│                    │   (buffered)  │                    │
 │                    └───────────────┘                    │
 │                                                         │
 └─────────────────────────────────────────────────────────┘
@@ -28,52 +28,136 @@ The transparency system logs all agent actions and provides a dashboard for oper
 
 ## Activity Logging
 
-All agent actions are logged:
-```typescript
-interface ActivityLogEntry {
-  id: string;
-  timestamp: Date;
-  type: ActivityType;
-  context: {
-    channel: string;
-    userId?: string;
-    sferaId?: string;
-  };
-  details: {
-    input?: string;
-    output?: string;
-    reasoning?: string;
-    memoriesAccessed?: string[];
-    confidence?: number;
-  };
-}
+All agent actions are logged to the `activity_log` table with buffered writes:
 
-type ActivityType = 
-  | 'message_received'
-  | 'message_sent'
-  | 'memory_stored'
-  | 'memory_searched'
-  | 'reflection_started'
-  | 'reflection_completed'
-  | 'interest_generated'
-  | 'interest_evolved'
-  | 'decision_made';
+```typescript
+interface ActivityEvent {
+  type: string;
+  channel?: string;
+  details?: Record<string, any>;
+  context?: { channel?: string; userId?: string };
+}
 ```
 
-## Logging Flow
+## Buffered Writes
+
+To optimize database performance, activity events are buffered:
 
 ```typescript
-class TransparencyLogger {
-  async log(entry: Omit<ActivityLogEntry, 'id' | 'timestamp'>) {
-    // 1. Save to database
-    await this.db.insert(activityLog).values(entry);
-    
-    // 2. Broadcast via WebSocket
-    this.ws.broadcast('activity', entry);
-    
-    // 3. Update dashboard
-    this.dashboard.update(entry);
+let activityBuffer: ActivityEvent[] = [];
+let flushTimer: NodeJS.Timeout | null = null;
+
+const FLUSH_INTERVAL = 5000;  // 5 seconds
+const MAX_BUFFER_SIZE = 50;    // Max events before flush
+
+async function logActivity(event: ActivityEvent) {
+  activityBuffer.push(event);
+
+  if (activityBuffer.length >= MAX_BUFFER_SIZE) {
+    await flushActivities();
+  } else if (!flushTimer) {
+    flushTimer = setTimeout(async () => {
+      await flushActivities();
+      flushTimer = null;
+    }, FLUSH_INTERVAL);
   }
+}
+
+async function flushActivities() {
+  if (activityBuffer.length === 0) return;
+
+  const events = [...activityBuffer];
+  activityBuffer = [];
+
+  try {
+    await db.insert(activityLog).values(
+      events.map(e => ({
+        type: e.type,
+        details: e.details,
+        context: { channel: e.channel, ...e.context },
+      }))
+    );
+  } catch (err) {
+    console.error('[Activity] Failed to flush:', err);
+    activityBuffer = [...events, ...activityBuffer]; // Re-queue on failure
+  }
+}
+```
+
+## Logged Events
+
+```typescript
+type ActivityType =
+  | 'message_received'    // Incoming message
+  | 'message_sent'        // Agent response
+  | 'memory_stored'       // Memory entry saved
+  | 'memory_searched'     // Vector search executed
+  | 'reflection_started'  // Reflection cycle started
+  | 'reflection_completed'// Reflection cycle completed
+  | 'interest_generated'  // New interest created
+  | 'interest_evolved'    // Interest score changed
+  | 'decision_made';      // Action decision with reasoning
+```
+
+## Query Activity Log
+
+```typescript
+async function getActivityLog(filters?: {
+  type?: string;
+  since?: Date;
+  limit?: number;
+}) {
+  const conditions = [];
+
+  if (filters?.type) {
+    conditions.push(eq(activityLog.type, filters.type));
+  }
+  if (filters?.since) {
+    conditions.push(gte(activityLog.timestamp, filters.since));
+  }
+
+  const query = db.select().from(activityLog)
+    .orderBy(desc(activityLog.timestamp));
+
+  if (conditions.length > 0) {
+    query.where(and(...conditions));
+  }
+
+  return query.limit(filters?.limit || 100);
+}
+```
+
+## Activity Statistics
+
+Get aggregated counts by type and channel:
+
+```typescript
+async function getStats(period: 'hour' | 'day' | 'week' = 'day') {
+  const since = new Date();
+  switch (period) {
+    case 'hour': since.setHours(since.getHours() - 1); break;
+    case 'day':  since.setDate(since.getDate() - 1); break;
+    case 'week': since.setDate(since.getDate() - 7); break;
+  }
+
+  const logs = await db.select().from(activityLog)
+    .where(gte(activityLog.timestamp, since));
+
+  const stats = {
+    total: logs.length,
+    byType: {} as Record<string, number>,
+    byChannel: {} as Record<string, number>,
+  };
+
+  for (const log of logs) {
+    stats.byType[log.type] = (stats.byType[log.type] || 0) + 1;
+    const channel = (log.context as any)?.channel;
+    if (channel) {
+      stats.byChannel[channel] = (stats.byChannel[channel] || 0) + 1;
+    }
+  }
+
+  return stats;
 }
 ```
 
@@ -98,71 +182,71 @@ Visualize interest evolution:
 - Archival history
 
 ### 4. Activity Feed
-Real-time stream of agent actions:
+Recent agent actions:
 - Message received/sent
 - Memory operations
 - Reflection cycles
 - Interest changes
 
-### 5. Reasoning Viewer
-Inspect LLM reasoning process:
-- Input context
-- Step-by-step reasoning
-- Output and confidence
-- Memory references
+## Database Schema
 
-## WebSocket Integration
+```sql
+CREATE TABLE cf_kristina_activity_log (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  timestamp TIMESTAMPTZ DEFAULT NOW(),
+  type TEXT NOT NULL CHECK (type IN (
+    'message_received', 'message_sent', 'memory_stored', 'memory_searched',
+    'reflection_started', 'reflection_completed', 'interest_generated',
+    'interest_evolved', 'decision_made'
+  )),
+  context JSONB,
+  details JSONB
+);
 
-Real-time updates via WebSocket:
-```typescript
-class TransparencyWebSocket {
-  private clients: Set<WebSocket>;
-  
-  broadcast(event: string, data: any) {
-    const message = JSON.stringify({ event, data });
-    
-    for (const client of this.clients) {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(message);
-      }
-    }
-  }
-}
+CREATE INDEX activity_log_timestamp_idx ON cf_kristina_activity_log(timestamp);
+CREATE INDEX activity_log_type_idx ON cf_kristina_activity_log(type);
 ```
 
 ## API Endpoints
 
+### Dashboard Data
 ```typescript
-// Get activity log
-GET /api/transparency/activity?limit=100&type=memory_stored
-
-// Get reflection timeline
-GET /api/transparency/reflections?from=2026-01-01&to=2026-12-31
-
-// Get interest graph
-GET /api/transparency/interests?active=true
-
-// Get reasoning for specific action
-GET /api/transparency/reasoning/:actionId
+GET /api/dashboard
+GET /api/dashboard?extended=1  // Includes per-service stats
 ```
+
+### Activity Log
+```typescript
+// Get activity log with filters
+getActivityLog(filters?: { type?: string; since?: Date; limit?: number })
+
+// Get aggregated stats
+getStats(period?: 'hour' | 'day' | 'week')
+```
+
+## Planned: WebSocket Real-Time Updates
+
+WebSocket integration for real-time dashboard updates is planned but not yet implemented. Current options being considered:
+- Vercel KV (Redis) for pub/sub
+- Server-Sent Events (SSE)
+- Polling for MVP
 
 ## Performance Considerations
 
-1. **Batch logging**: Batch inserts for high throughput
-2. **Indexing**: Index on timestamp, type, context
-3. **Pagination**: Use cursor-based pagination
-4. **Cleanup**: Archive old logs (keep 90 days)
+1. **Buffered writes**: Max 50 events or 5-second flush interval
+2. **Indexing**: Indexes on timestamp and type
+3. **Pagination**: Default limit 100 for log queries
+4. **Failure handling**: Events re-queued on database failure
 
 ## Privacy Considerations
 
-1. **User data**: Anonymize user IDs in public logs
-2. **Secrets**: Never log API keys or tokens
-3. **Access control**: Restrict dashboard access to operators
-4. **Audit trail**: Log all dashboard access
+1. **User data**: User IDs stored in context
+2. **Secrets**: Never logged (memory scanning before storage)
+3. **Access control**: Dashboard accessible to operators
 
 ## Testing
 
-- Unit tests for logging
-- Integration tests for WebSocket broadcast
-- Load tests for high-throughput logging
-- E2E tests for dashboard components
+- Unit tests for buffered writes
+- Flush interval tests
+- Activity log query tests
+- Stats aggregation tests

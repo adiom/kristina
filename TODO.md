@@ -2,97 +2,75 @@
 
 ## Priority: High
 
-### Project Setup
-- [ ] Initialize Next.js project with TypeScript
-- [ ] Configure Tailwind CSS
-- [ ] Set up Drizzle ORM
-- [ ] Create `.env.local` with required variables
-- [ ] Set up PostgreSQL connection (Supabase/Neon)
-
-### Database
-- [ ] Create database schema (Drizzle)
-- [ ] Generate migrations
-- [ ] Apply migrations
-- [ ] Create seed data for testing
-
-### Memory System
-- [ ] Implement `MemoryStore` class
-- [ ] Add dual-namespace support (userId=null vs userId=<id>)
-- [ ] Implement vector search with pgvector
-- [ ] Create memory tools for AI
-- [ ] Add secret scanning before storage
-
-### Agent Core
-- [ ] Implement `ContextManager` class
-- [ ] Create `IsolatedContext` system
-- [ ] Build LLM integration (Claude API)
-- [ ] Add conversation history management
-- [ ] Implement basic chat endpoint
+### Completed ✅
+- [x] Initialize Next.js project with TypeScript
+- [x] Configure Tailwind CSS v4
+- [x] Set up Drizzle ORM
+- [x] Create `.env.local` with required variables
+- [x] Set up PostgreSQL connection
+- [x] Create database schema (Drizzle)
+- [x] Generate migrations
+- [x] Apply migrations
+- [x] Implement memory store (4-namespace)
+- [x] Add vector search with pgvector (768-dim)
+- [x] Create memory tools for AI
+- [x] Add secret scanning before storage
+- [x] Implement processAgent core
+- [x] Create AgentContext system
+- [x] Build LLM integration (LM Studio)
+- [x] Add conversation history management
+- [x] Implement HTTP endpoint (POST /api/agent)
+- [x] Implement MCP endpoint (POST /api/mcp)
+- [x] Implement reflection cycle
+- [x] Create reflection triggers (manual)
+- [x] Build insight extraction logic (ИНСАЙТ: regex)
+- [x] Add reflection diary
+- [x] Implement interest update after reflection
+- [x] Implement interest system
+- [x] Add interest lifecycle (add/grow/decay/cross-pollinate/archive)
+- [x] Implement decay algorithm (linear)
+- [x] Implement growth algorithm (+0.5)
+- [x] Add cross-pollination between interests (+0.2)
+- [x] Implement archival (below threshold 2 for 30d)
+- [x] Create core personality prompt
+- [x] Implement dynamic traits (DB-backed, 8 defaults)
+- [x] Build trait evolution logic
+- [x] Add personality history logging
+- [x] Implement activity logging
+- [x] Build dashboard UI components
+- [x] Add memory browser
+- [x] Add reflection timeline
+- [x] Add interest graph
+- [x] Implement policy layer (validation, rate limiting)
+- [x] Write processAgent tests
+- [x] Write policy tests
 
 ## Priority: Medium
 
-### Reflection System
-- [ ] Implement `ReflectionCycle` class
-- [ ] Create reflection triggers (scheduled, interest-driven)
-- [ ] Build insight extraction logic
-- [ ] Add reflection diary
-- [ ] Implement interest update after reflection
+### In Progress 🔄
+- [ ] Scheduled reflection triggers (cron/scheduler)
+- [ ] Interest auto-generation from memory analysis
 
-### Interest System
-- [ ] Implement `InterestSystem` class
-- [ ] Add interest generation from memory
-- [ ] Implement decay algorithm (7-day half-life)
-- [ ] Implement growth algorithm (3-day window)
-- [ ] Add cross-pollination between interests
-- [ ] Implement archival (below threshold 2 for 30d)
-
-### Personality System
-- [ ] Create core personality prompt
-- [ ] Implement dynamic traits (DB-backed)
-- [ ] Add emotional state tracking
-- [ ] Build trait evolution logic
-- [ ] Add personality history logging
-
-### Transparency
-- [ ] Implement activity logging
-- [ ] Create WebSocket for real-time updates (or SSE)
-- [ ] Build dashboard UI components
-- [ ] Add memory browser
-- [ ] Add reflection timeline
-- [ ] Add interest graph
-- [ ] Add reasoning viewer
-
-## Priority: Low
-
-### Channels
-- [ ] Implement MCP Server for Sfera integration
-- [ ] Create ATMv0 Client for economic simulations
-- [ ] Add webhook support for external integrations
-
-### Testing
-- [ ] Unit tests for memory system
-- [ ] Integration tests for reflection cycle
-- [ ] E2E tests for chat flow
-- [ ] Load testing for vector search
-
-### Documentation
+### Planned 📋
+- [ ] Add emotional state tracking (valence/arousal/dominance)
+- [ ] Add reasoning viewer (CoT inspection)
+- [ ] Optimize performance
+- [ ] Add error handling
+- [ ] Deploy to Vercel
 - [ ] API documentation
 - [ ] Deployment guide
 - [ ] User guide for dashboard
 
----
+## Priority: Low
 
-## Completed
-
-### 2026-07-03
-- [x] Architecture design documented
-- [x] Project structure defined
-- [x] Tech stack selected
-- [x] Database schema designed
-- [x] CLAUDE.md created
-- [x] ARCHITECTURE.md created
-- [x] PROGRESS.md created
-- [x] MEMORY.md created
+### Planned 📋
+- [ ] Implement MCP Server for Sfera integration
+- [ ] Create ATMv0 Client for economic simulations
+- [ ] Add webhook support for external integrations
+- [ ] Add WebSocket for real-time dashboard updates
+- [ ] Integration tests for reflection cycle
+- [ ] E2E tests for chat flow
+- [ ] Load testing for vector search
 
 ---
 
@@ -105,12 +83,12 @@
 - Edge runtime for some routes
 
 ### Testing Strategy
-- Unit tests: Vitest
-- Integration tests: Vitest + test database
-- E2E tests: Playwright
-- Load testing: k6 or artillery
+- Unit tests: Jest + ts-jest
+- Integration tests: Jest + test database
+- E2E tests: Playwright [planned]
+- Load testing: k6 or artillery [planned]
 
 ### Monitoring
 - Vercel Analytics for performance
-- Sentry for error tracking
+- Sentry for error tracking [planned]
 - Custom dashboard for agent activity

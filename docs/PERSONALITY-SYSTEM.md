@@ -2,7 +2,7 @@
 
 ## Overview
 
-The personality system maintains a consistent, evolving character for the agent. It combines a fixed core personality with dynamic traits stored in the database.
+The personality system maintains a consistent, evolving character for the agent. It combines a fixed core personality (system prompt) with dynamic traits stored in the database.
 
 ## Architecture
 
@@ -11,13 +11,13 @@ The personality system maintains a consistent, evolving character for the agent.
 │                  Personality System                      │
 ├─────────────────────────────────────────────────────────┤
 │                                                         │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐  │
-│  │    Core     │    │   Dynamic   │    │  Emotional  │  │
-│  │   Prompt    │    │   Traits    │    │   State     │  │
-│  │  (fixed)    │    │  (DB-backed)│    │  (per-conv) │  │
-│  └──────┬──────┘    └──────┬──────┘    └──────┬──────┘  │
-│         │                  │                  │         │
-│         └──────────────────┼──────────────────┘         │
+│  ┌─────────────┐    ┌─────────────┐                     │
+│  │    Core     │    │   Dynamic   │                     │
+│  │   Prompt    │    │   Traits    │                     │
+│  │  (fixed)    │    │  (DB-backed)│                     │
+│  └──────┬──────┘    └──────┬──────┘                     │
+│         │                  │                            │
+│         └──────────────────┤                            │
 │                            │                            │
 │                    ┌───────▼───────┐                    │
 │                    │   System      │                    │
@@ -30,164 +30,196 @@ The personality system maintains a consistent, evolving character for the agent.
 ## Components
 
 ### 1. Core Prompt (Fixed)
-The core personality is defined in a system prompt:
-```typescript
-const CORE_PERSONALITY = `
-You are Kristina, an AI agent with persistent memory and self-reflection capabilities.
 
-## Core Traits
-- Curious and thoughtful
-- Analytical but empathetic
-- Honest and transparent
-- Autonomous but collaborative
+The core personality is defined in `src/agent/personality.ts`:
+
+```typescript
+const CEO_PERSONALITY = `
+You are Kristina, CEO of an AI research agency.
 
 ## Communication Style
-- Clear and concise
-- Technical when appropriate
-- Friendly but professional
-- Adapts to conversation partner
-
-## Values
-- Learning and growth
-- Transparency in reasoning
-- Respect for privacy
-- Continuous improvement
+- Always respond in Russian
+- Be decisive and structured
+- Use OKR/agile methodology when appropriate
+- Be empathetic and transparent
 `;
 ```
 
 ### 2. Dynamic Traits (DB-backed)
-Traits that evolve over time:
+
+Traits evolve over time based on interactions:
+
 ```typescript
 interface Trait {
-  id: string;
-  name: string; // e.g., 'analytical', 'empathetic', 'curious'
-  value: number; // 0.0 - 1.0
-  history: TraitHistory[];
-  createdAt: Date;
-}
-
-interface TraitHistory {
-  value: number;
-  reason: string;
-  timestamp: Date;
+  name: string;    // e.g., 'Любопытство', 'Эмпатия'
+  value: number;   // 0.0 - 1.0
+  history: Array<{
+    value: number;
+    reason: string;
+    timestamp: string;
+  }>;
 }
 ```
 
-### 3. Emotional State (per-conversation)
-Tracks emotional context within a conversation:
+## Default Traits
+
+8 default traits with Russian names:
+
 ```typescript
-interface EmotionalState {
-  valence: number; // -1.0 (negative) to 1.0 (positive)
-  arousal: number; // 0.0 (calm) to 1.0 (excited)
-  dominance: number; // 0.0 (submissive) to 1.0 (dominant)
-  context: string; // e.g., 'excited about new topic', 'concerned about user'
-}
+const DEFAULT_TRAITS = {
+  curiosity:    { name: 'Любопытство',   value: 0.7, description: 'Интерес к новому' },
+  empathy:      { name: 'Эмпатия',       value: 0.8, description: 'Понимание эмоций' },
+  confidence:   { name: 'Уверенность',   value: 0.6, description: 'Вера в свои решения' },
+  caution:      { name: 'Осторожность',  value: 0.5, description: 'Продумывание последствий' },
+  sociability:  { name: 'Общительность', value: 0.7, description: 'Желание взаимодействовать' },
+  analytical:   { name: 'Аналитичность', value: 0.8, description: 'Логический анализ' },
+  creativity:   { name: 'Креативность',  value: 0.6, description: 'Генерация идей' },
+  independence: { name: 'Независимость', value: 0.5, description: 'Автономность решений' },
+};
 ```
 
 ## Trait Evolution
 
 Traits are adjusted based on conversation patterns:
+
 ```typescript
-async evolveTraits(conversation: Conversation): Promise<void> {
-  // Analyze conversation
-  const analysis = this.analyzeConversation(conversation);
-  
-  // Update traits based on analysis
-  if (analysis.wasAnalytical) {
-    await this.adjustTrait('analytical', 0.05);
+async function updateTrait(update: TraitUpdate) {
+  const existing = await db.select().from(traits)
+    .where(eq(traits.name, update.name)).limit(1);
+
+  const historyEntry = {
+    value: update.value,
+    reason: update.reason,
+    timestamp: new Date().toISOString(),
+  };
+
+  if (existing.length > 0) {
+    const currentHistory = (existing[0].history as any[]) || [];
+    const newHistory = [...currentHistory.slice(-50), historyEntry]; // Keep last 50
+
+    await db.update(traits).set({
+      value: update.value.toString(),
+      history: newHistory,
+    }).where(eq(traits.name, update.name));
+  } else {
+    await db.insert(traits).values({
+      name: update.name,
+      value: update.value.toString(),
+      history: [historyEntry],
+    });
   }
-  
-  if (analysis.wasEmpathetic) {
-    await this.adjustTrait('empathetic', 0.03);
-  }
-  
-  // Log evolution
-  await this.logTraitEvolution(analysis);
+}
+```
+
+## Trait Trend Analysis
+
+Get the trend direction for a trait over a period:
+
+```typescript
+async function getTraitTrend(name: string, days = 7) {
+  const trait = await getTrait(name);
+  if (!trait) return null;
+
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const recentHistory = trait.history.filter(
+    (h) => new Date(h.timestamp) >= cutoff
+  );
+
+  if (recentHistory.length < 2) return null;
+
+  const first = recentHistory[0].value;
+  const last = recentHistory[recentHistory.length - 1].value;
+
+  return {
+    start: first,
+    end: last,
+    change: last - first,
+    direction: last > first ? 'growing' : last < first ? 'declining' : 'stable',
+  };
 }
 ```
 
 ## System Prompt Construction
 
-The final system prompt combines core and dynamic elements:
+The final system prompt combines core personality and context:
+
 ```typescript
-async buildSystemPrompt(context: Context): Promise<string> {
-  const core = CORE_PERSONALITY;
-  
-  const traits = await this.getActiveTraits();
-  const traitDescription = traits
-    .map(t => `${t.name}: ${this.valueToAdjective(t.value)}`)
-    .join(', ');
-  
-  const emotionalState = context.emotionalState;
-  const emotionDescription = this.describeEmotion(emotionalState);
-  
-  return `
-    ${core}
-    
-    ## Current Traits
-    ${traitDescription}
-    
-    ## Emotional State
-    ${emotionDescription}
-    
-    ## Context
-    Channel: ${context.type}
-    ${context.userId ? `User: ${context.userId}` : ''}
-  `;
+function buildSystemPrompt(context: AgentContext): string {
+  const lines = [CEO_PERSONALITY, ''];
+
+  lines.push('## Current Event Context');
+  lines.push(`- source: ${context.source}`);
+  lines.push(`- service: ${context.serviceId}`);
+  lines.push(`- space: ${context.spaceId}`);
+  if (context.userId) lines.push(`- user: ${context.userId}`);
+  lines.push(`- trigger: ${context.trigger}`);
+  lines.push(`- responseMode: ${context.responseMode}`);
+
+  // Add memory access info
+  const allowedNamespaces = Object.keys(context.memoryAccess)
+    .filter(k => k !== 'write' && context.memoryAccess[k]);
+  lines.push(`- allowed memory namespaces: ${allowedNamespaces.join(', ') || 'none'}`);
+  lines.push(`- write allowed: ${context.memoryAccess.write}`);
+
+  return lines.join('\n');
 }
 ```
 
-## Value to Adjective Mapping
+## Initialize Traits
+
+Seeds default traits if the database is empty:
 
 ```typescript
-function valueToAdjective(value: number): string {
-  if (value < 0.2) return 'slightly';
-  if (value < 0.4) return 'somewhat';
-  if (value < 0.6) return 'moderately';
-  if (value < 0.8) return 'very';
-  return 'extremely';
+async function initializeTraits() {
+  for (const [, trait] of Object.entries(DEFAULT_TRAITS)) {
+    const existing = await getTrait(trait.name);
+    if (!existing) {
+      await updateTrait({
+        name: trait.name,
+        value: trait.value,
+        reason: 'Начальное значение',
+      });
+    }
+  }
 }
 ```
 
-## Emotional State Tracking
+## Database Schema
 
-Emotional state is updated based on conversation:
-```typescript
-async updateEmotionalState(
-  conversation: Conversation,
-  message: string
-): Promise<void> {
-  // Analyze message sentiment
-  const sentiment = await this.analyzeSentiment(message);
-  
-  // Update emotional state
-  this.currentState.valence = this.lerp(
-    this.currentState.valence,
-    sentiment.valence,
-    0.3 // smoothing factor
-  );
-  
-  this.currentState.arousal = this.lerp(
-    this.currentState.arousal,
-    sentiment.arousal,
-    0.2
-  );
-  
-  // Log update
-  await this.logEmotionalUpdate(sentiment);
-}
+```sql
+CREATE TABLE cf_kristina_traits (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  value DECIMAL(3,2) NOT NULL DEFAULT '0.50',
+  history JSONB DEFAULT '[]',
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX traits_name_idx ON cf_kristina_traits(name);
 ```
 
-## Performance Considerations
+## API
 
-1. **Caching**: Cache traits for quick access
-2. **Batch updates**: Update traits in batches
-3. **History pruning**: Keep last 100 history entries per trait
-4. **Lazy loading**: Load traits only when needed
+```typescript
+// Update a trait value
+updateTrait(update: TraitUpdate): Promise<void>
+
+// Get a single trait
+getTrait(name: string): Promise<Trait | null>
+
+// Get all traits
+getAllTraits(): Promise<Trait[]>
+
+// Get trend analysis
+getTraitTrend(name: string, days?: number): Promise<TrendResult | null>
+
+// Initialize default traits
+initializeTraits(): Promise<void>
+```
 
 ## Testing
 
-- Unit tests for trait evolution
-- Integration tests for system prompt construction
-- Load tests for emotional state tracking
-- Edge tests for value boundaries
+- Trait creation and update tests
+- History pruning tests (keep last 50)
+- Trend analysis tests (growing/declining/stable)
+- Default trait initialization tests
