@@ -4,10 +4,12 @@ import { eq, and, desc, sql, isNull, isNotNull } from 'drizzle-orm';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { embed } from 'ai';
 
-const lmstudio = createOpenAICompatible({
-  name: 'lmstudio',
-  baseURL: process.env.LM_STUDIO_URL || 'http://localhost:1234/v1',
-});
+function getLmStudio() {
+  return createOpenAICompatible({
+    name: 'lmstudio',
+    baseURL: process.env.LM_STUDIO_URL || 'http://localhost:1234/v1',
+  });
+}
 
 interface SearchOptions {
   userId?: string;
@@ -44,6 +46,7 @@ function containsSecret(text: string): boolean {
 }
 
 async function generateEmbedding(text: string): Promise<number[]> {
+  const lmstudio = getLmStudio();
   const embeddingModel = lmstudio.embeddingModel(
     process.env.EMBEDDING_MODEL || 'text-embedding-nomic-embed-text-v1.5'
   );
@@ -136,11 +139,11 @@ async function searchMemory(query: string, options: SearchOptions) {
       userId: memory.userId,
       context: memory.context,
       createdAt: memory.createdAt,
-      similarity: sql<number>`1 - (${memory.embedding} <=> ${queryEmbedding}::vector)`,
+      similarity: sql<number>`1 - (${memory.embedding} <=> ${sql.raw(`'[${queryEmbedding.join(',')}]'::vector`)})`,
     })
     .from(memory)
     .where(whereCondition)
-    .orderBy(sql`${memory.embedding} <=> ${queryEmbedding}::vector`)
+    .orderBy(sql`${memory.embedding} <=> ${sql.raw(`'[${queryEmbedding.join(',')}]'::vector`)}`)
     .limit(limit);
 
   return results.filter((r) => r.similarity >= minSimilarity);
