@@ -21,28 +21,29 @@ interface ExtractedMemory {
  * Check if user explicitly asked to remember something.
  */
 export function isExplicitMemoryRequest(prompt: string): boolean {
-  const lower = prompt.toLowerCase();
   const patterns = [
-    /запомни/,
-    /запомн/,
-    /не забудь/,
-    /сохрани/,
-    /запиши/,
+    /запомни/i,
+    /запомн/i,
+    /не забудь/i,
+    /сохрани/i,
+    /запиши/i,
     /记住/,
-    /remember/,
-    /save this/,
-    /keep in mind/,
+    /remember/i,
+    /save this/i,
+    /keep in mind/i,
   ];
-  return patterns.some(p => p.test(lower));
+  return patterns.some(p => p.test(prompt));
 }
 
 /**
  * Extract the "what to remember" part from explicit request.
  * E.g., "запомни что я люблю кофе" -> "Пользователь любит кофе"
  */
+/**
+ * Extract the "what to remember" part from explicit request.
+ * E.g., "запомни что я люблю кофе" -> "Пользователь любит кофе"
+ */
 export function extractExplicitContent(prompt: string): string {
-  const lower = prompt.toLowerCase();
-
   // Remove common prefixes
   const prefixes = [
     /запомни,?\s*/i,
