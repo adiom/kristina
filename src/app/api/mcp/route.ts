@@ -26,8 +26,10 @@ import { canAccessMemory, PolicyError } from '@/policy';
 import type { AgentContext } from '@/agent/types';
 
 export async function POST(request: NextRequest) {
+  let raw = '';
   try {
-    const body = await request.json();
+    raw = await request.text();
+    const body = JSON.parse(raw);
     const { method, params, id } = body;
 
     if (method === 'initialize') {
@@ -202,10 +204,13 @@ function mcpError(id: any, err: unknown) {
       id,
     });
   }
+  // Surface the real error message so the caller can debug – but keep
+  // a generic code per JSON‑RPC conventions.
+  const message = err instanceof Error ? err.message : String(err);
   console.error('[mcp] unexpected', err);
   return NextResponse.json({
     jsonrpc: '2.0',
-    error: { code: -32603, message: 'Internal error' },
+    error: { code: -32603, message: `Internal error: ${message}` },
     id,
   });
 }

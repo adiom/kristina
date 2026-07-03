@@ -27,9 +27,9 @@ function getLmStudio() {
 }
 
 interface SearchOptions {
-  userId?: string;
-  spaceId?: string;
-  service?: string;
+  userId?: string | null;
+  spaceId?: string | null;
+  service?: string | null;
   category?: string;
   minSimilarity?: number;
   limit?: number;
@@ -65,6 +65,40 @@ function containsSecret(text: string): boolean {
   return SECRET_PATTERNS.some((pattern) => pattern.test(text));
 }
 
+/* ------------------------------------------------------------------ */
+/* String → UUID conversion                                           */
+/*                                                                     */
+/* The `userId` and `spaceId` columns are typed as `uuid` in Postgres, */
+/* but external services (Sfera, news sites, etc.) pass plain strings. */
+/* We derive a deterministic UUIDv5 from each string so the same input */
+/* always maps to the same row.  No external crypto dependency – just  */
+/* a tiny SHA‑1 based implementation.                                  */
+/* ------------------------------------------------------------------ */
+
+import { createHash } from 'crypto';
+
+// Fixed namespace UUID (arbitrary but stable) for our agent.
+const NAMESPACE = '6f1c7aed-30d2-4f5b-9f88-3a5b9d2e4a11';
+
+function stringToUuid(input: string): string {
+  const hash = createHash('sha1')
+    .update(NAMESPACE)
+    .update(input)
+    .digest();
+  // Set version (5) and variant (10xx) bits per RFC 4122.
+  const bytes = Buffer.from(hash.subarray(0, 16));
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x50;
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return (
+    hex.slice(0, 8) + '-' +
+    hex.slice(8, 12) + '-' +
+    hex.slice(12, 16) + '-' +
+    hex.slice(16, 20) + '-' +
+    hex.slice(20, 32)
+  );
+}
+
 async function generateEmbedding(text: string): Promise<number[]> {
   const lmstudio = getLmStudio();
   const embeddingModel = lmstudio.embeddingModel(
@@ -96,7 +130,7 @@ export async function storeOwnMemory(entry: StoreEntry) {
     importance: entry.importance,
     tags: entry.tags || [],
     userId: null,
-    spaceId: entry.spaceId ?? null,
+    spaceId: entry.spaceId ? stringToUuid(entry.spaceId) : null,
     service: entry.service ?? null,
     context: entry.context || {},
     embedding,
@@ -118,8 +152,8 @@ export async function storeUserMemory(
     category: entry.category,
     importance: entry.importance,
     tags: entry.tags || [],
-    userId,
-    spaceId: entry.spaceId ?? null,
+    userId: stringToUuid(userId),
+    spaceId: entry.spaceId ? stringToUuid(entry.spaceId) : null,
     service: entry.service ?? null,
     context: entry.context || {},
     embedding,
@@ -141,8 +175,8 @@ export async function storeSpaceMemory(
     category: entry.category,
     importance: entry.importance,
     tags: entry.tags || [],
-    userId: entry.userId ?? null,
-    spaceId,
+    userId: entry.userId ? stringToUuid(entry.userId) : null,
+    spaceId: stringToUuid(spaceId),
     service: entry.service ?? null,
     context: entry.context || {},
     embedding,
@@ -230,7 +264,11 @@ async function searchMemory(query: string, options: SearchOptions) {
     if (options.userId === null) {
       conditions.push(isNull(memory.userId));
     } else {
-      conditions.push(eq(memory.userId, options.userId));
+      // `userId` from external services is an arbitrary string (e.g.
+      // "test-user-1").  The column is `uuid`, so we hash the string
+      // into a deterministic UUIDv5 for the lookup only.
+      const uuid = stringToUuid(options.userId);
+      conditions.push(eq(memory.userId, uuid));
     }
   } else {
     // If no userId specified, exclude user‑scoped rows so the agent
@@ -239,10 +277,11 @@ async function searchMemory(query: string, options: SearchOptions) {
   }
 
   if (options.spaceId) {
-    conditions.push(eq(memory.spaceId, options.spaceId));
+    conditions.push(eq(memory.spaceId, stringToUuid(options.spaceId)));
   }
 
   if (options.service) {
+    // `service` is a plain text column – no conversion needed.
     conditions.push(eq(memory.service, options.service));
   }
 
