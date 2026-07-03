@@ -37,6 +37,13 @@ import {
   assertWriteAllowed,
   checkRateLimit,
 } from '../policy';
+import {
+  isExplicitMemoryRequest,
+  extractExplicitContent,
+  extractMemories,
+  persistAutoMemories,
+  persistExplicitMemory,
+} from '../memory/extractor';
 
 // Provider selection: GROQ (cloud, faster, larger models) or LM Studio (local)
 const provider = process.env.LLM_PROVIDER || 'lmstudio';
@@ -406,6 +413,32 @@ ${memorySnippet || '(no relevant memory)'}
 
   // Persist any new knowledge the agent decided to record.
   await persistResultMemory(result, context);
+
+  // Auto-extract significant memories from the conversation
+  if (context.memoryAccess.write) {
+    try {
+      // Check if user explicitly asked to remember something
+      if (isExplicitMemoryRequest(prompt)) {
+        const explicitContent = extractExplicitContent(prompt);
+        if (explicitContent.length > 5) {
+          const saved = await persistExplicitMemory(explicitContent, context);
+          if (saved) {
+            console.log('[processAgent] Explicit memory saved:', explicitContent);
+          }
+        }
+      }
+
+      // Auto-extract memories from the conversation
+      const autoMemories = await extractMemories(prompt, text, context);
+      if (autoMemories.length > 0) {
+        await persistAutoMemories(autoMemories, context);
+        console.log(`[processAgent] Auto-extracted ${autoMemories.length} memories`);
+      }
+    } catch (err) {
+      // Memory extraction must never break the response
+      console.error('[processAgent] Memory extraction failed:', err);
+    }
+  }
 
   await logActivity({
     type: 'message_sent',
