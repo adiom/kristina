@@ -7,6 +7,7 @@ import {
   searchUserMemory,
   storeOwnMemory,
 } from '../memory/store';
+import { logActivity } from '../transparency';
 
 const lmstudio = createOpenAICompatible({
   name: 'lmstudio',
@@ -27,13 +28,28 @@ const tools = {
         .describe('Filter by memory category'),
     }),
     execute: async ({ query, category }) => {
-      const results = await searchOwnMemory(query, { category });
-      return results.map((r) => ({
-        content: r.content,
-        category: r.category,
-        importance: r.importance,
-        similarity: r.similarity,
-      }));
+      const start = Date.now();
+      try {
+        const results = await searchOwnMemory(query, { category });
+        await logActivity({
+          type: 'memory_searched',
+          channel: 'agent',
+          details: { query, category, count: results.length, scope: 'own' },
+        });
+        return results.map((r) => ({
+          content: r.content,
+          category: r.category,
+          importance: r.importance,
+          similarity: r.similarity,
+        }));
+      } catch (e) {
+        await logActivity({
+          type: 'memory_searched',
+          channel: 'agent',
+          details: { query, category, error: String(e) },
+        });
+        throw e;
+      }
     },
   }),
 
@@ -45,13 +61,28 @@ const tools = {
       query: z.string().describe('The search query'),
     }),
     execute: async ({ userId, query }) => {
-      const results = await searchUserMemory(userId, query);
-      return results.map((r) => ({
-        content: r.content,
-        category: r.category,
-        importance: r.importance,
-        similarity: r.similarity,
-      }));
+      const start = Date.now();
+      try {
+        const results = await searchUserMemory(userId, query);
+        await logActivity({
+          type: 'memory_searched',
+          channel: 'agent',
+          details: { userId, query, count: results.length, scope: 'user' },
+        });
+        return results.map((r) => ({
+          content: r.content,
+          category: r.category,
+          importance: r.importance,
+          similarity: r.similarity,
+        }));
+      } catch (e) {
+        await logActivity({
+          type: 'memory_searched',
+          channel: 'agent',
+          details: { userId, query, error: String(e) },
+        });
+        throw e;
+      }
     },
   }),
 
@@ -71,8 +102,23 @@ const tools = {
       tags: z.array(z.string()).optional().describe('Tags for categorization'),
     }),
     execute: async ({ content, category, importance, tags }) => {
-      await storeOwnMemory({ content, category, importance, tags });
-      return { stored: true };
+      const start = Date.now();
+      try {
+        await storeOwnMemory({ content, category, importance, tags });
+        await logActivity({
+          type: 'memory_stored',
+          channel: 'agent',
+          details: { category, importance, tags, contentLength: content.length },
+        });
+        return { stored: true };
+      } catch (e) {
+        await logActivity({
+          type: 'memory_stored',
+          channel: 'agent',
+          details: { category, error: String(e) },
+        });
+        throw e;
+      }
     },
   }),
 };
