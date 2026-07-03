@@ -1,6 +1,29 @@
+/**
+ * MCP transport for the cf-kristina agent runtime.
+ *
+ * Exposes the agent over JSON‑RPC 2.0 (Model Context Protocol).  The
+ * available tools are:
+ *
+ *   - agent_message(prompt, context) → run the agent and return text
+ *   - agent_search(query, context)   → search memory (read‑only)
+ *   - agent_info()                   → version + capabilities
+ *
+ * `processAgent` does all the real work – this file is just a thin
+ * adapter that translates JSON‑RPC into the typed `AgentContext` and
+ * `AgentResult` shapes defined in `src/agent/types.ts`.
+ */
+
 import { NextRequest, NextResponse } from 'next/server';
-import { createAgent } from '@/agent/core';
-import { searchOwnMemory } from '@/memory/store';
+import { processAgent } from '@/agent/core';
+import { getAgentInfo, PROTOCOL_VERSION } from '@/agent/version';
+import {
+  searchOwnMemory,
+  searchUserMemory,
+  searchSpaceMemory,
+  searchServiceMemory,
+} from '@/memory/store';
+import { canAccessMemory, PolicyError } from '@/policy';
+import type { AgentContext } from '@/agent/types';
 
 export async function POST(request: NextRequest) {
   try {
@@ -11,13 +34,11 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({
         jsonrpc: '2.0',
         result: {
-          protocolVersion: '2025-03-26',
-          capabilities: {
-            tools: { listChanged: false },
-          },
+          protocolVersion: PROTOCOL_VERSION,
+          capabilities: { tools: { listChanged: false } },
           serverInfo: {
             name: 'cf-kristina',
-            version: '1.0.0',
+            version: PROTOCOL_VERSION,
           },
         },
         id,
@@ -34,27 +55,35 @@ export async function POST(request: NextRequest) {
         result: {
           tools: [
             {
-              name: 'send_message',
-              description: 'Отправить сообщение в чат Авроры Сферы',
+              name: 'agent_message',
+              description:
+                'Send a message to Kristina. Returns a structured answer with sources.',
               inputSchema: {
                 type: 'object',
                 properties: {
-                  text: { type: 'string', description: 'Текст сообщения' },
+                  prompt: { type: 'string' },
+                  context: { type: 'object' },
                 },
-                required: ['text'],
+                required: ['prompt', 'context'],
               },
             },
             {
-              name: 'search_memory',
-              description: 'Поиск в памяти агента',
+              name: 'agent_search',
+              description:
+                'Search Kristina memory (read‑only) within the given context.',
               inputSchema: {
                 type: 'object',
                 properties: {
-                  query: { type: 'string', description: 'Поисковый запрос' },
-                  userId: { type: 'string', description: 'ID пользователя (необязательно)' },
+                  query: { type: 'string' },
+                  context: { type: 'object' },
                 },
-                required: ['query'],
+                required: ['query', 'context'],
               },
+            },
+            {
+              name: 'agent_info',
+              description: 'Return agent version and capabilities.',
+              inputSchema: { type: 'object', properties: {} },
             },
           ],
         },
@@ -63,64 +92,72 @@ export async function POST(request: NextRequest) {
     }
 
     if (method === 'tools/call') {
-      const { name, arguments: args } = params;
-      
-      if (name === 'search_memory') {
-        const { query, userId } = args;
-        const results = await searchOwnMemory(query);
+      const { name, arguments: args } = params || {};
+
+      if (name === 'agent_info') {
         return NextResponse.json({
           jsonrpc: '2.0',
           result: {
             content: [
-              {
-                type: 'text',
-                text: JSON.stringify(results.map(r => ({
-                  content: r.content,
-                  category: r.category,
-                  similarity: r.similarity,
-                })), null, 2),
-              },
+              { type: 'text', text: JSON.stringify(getAgentInfo(), null, 2) },
             ],
           },
           id,
         });
       }
 
-      if (name === 'send_message') {
-        const { message, text } = args;
-        const prompt = message || text;
-        const agent = createAgent();
-        const result = await agent.generate({ prompt });
-        return NextResponse.json({
-          jsonrpc: '2.0',
-          result: {
-            content: [
-              {
-                type: 'text',
-                text: result.text,
-              },
-            ],
-          },
-          id,
-        });
+      if (name === 'agent_message') {
+        const { prompt, context } = args || {};
+        try {
+          const result = await processAgent(
+            prompt,
+            context as AgentContext,
+          );
+          return NextResponse.json({
+            jsonrpc: '2.0',
+            result: {
+              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+            },
+            id,
+          });
+        } catch (err) {
+          return mcpError(id, err);
+        }
+      }
+
+      if (name === 'agent_search') {
+        const { query, context } = args || {};
+        if (!context) {
+          return NextResponse.json({
+            jsonrpc: '2.0',
+            error: { code: -32602, message: 'context is required' },
+            id,
+          });
+        }
+        try {
+          const hits = await runSearch(query, context as AgentContext);
+          return NextResponse.json({
+            jsonrpc: '2.0',
+            result: {
+              content: [{ type: 'text', text: JSON.stringify(hits, null, 2) }],
+            },
+            id,
+          });
+        } catch (err) {
+          return mcpError(id, err);
+        }
       }
 
       return NextResponse.json({
         jsonrpc: '2.0',
-        error: {
-          code: -32601,
-          message: `Tool ${name} not found`,
-        },
+        error: { code: -32601, message: `Tool ${name} not found` },
         id,
       });
     }
 
     return NextResponse.json({
       jsonrpc: '2.0',
-      error: {
-        code: -32601,
-        message: `Method ${method} not found`,
-      },
+      error: { code: -32601, message: `Method ${method} not found` },
       id,
     });
   } catch (error) {
@@ -128,13 +165,47 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       {
         jsonrpc: '2.0',
-        error: {
-          code: -32603,
-          message: 'Internal error',
-        },
+        error: { code: -32603, message: 'Internal error' },
         id: null,
       },
-      { status: 500 }
+      { status: 500 },
     );
   }
+}
+
+async function runSearch(query: string, context: AgentContext) {
+  const out: any[] = [];
+  if (canAccessMemory(context, 'own')) {
+    const own = await searchOwnMemory(query, { limit: 5 });
+    own.forEach((m) => out.push({ ...m, scope: 'own' }));
+  }
+  if (canAccessMemory(context, 'user') && context.userId) {
+    const u = await searchUserMemory(context.userId, query, { limit: 5 });
+    u.forEach((m) => out.push({ ...m, scope: 'user' }));
+  }
+  if (canAccessMemory(context, 'space')) {
+    const s = await searchSpaceMemory(context.spaceId, query, { limit: 5 });
+    s.forEach((m) => out.push({ ...m, scope: 'space' }));
+  }
+  if (canAccessMemory(context, 'service')) {
+    const svc = await searchServiceMemory(context.serviceId, query, { limit: 5 });
+    svc.forEach((m) => out.push({ ...m, scope: 'service' }));
+  }
+  return out;
+}
+
+function mcpError(id: any, err: unknown) {
+  if (err instanceof PolicyError) {
+    return NextResponse.json({
+      jsonrpc: '2.0',
+      error: { code: -32602, message: err.message, data: { code: err.code } },
+      id,
+    });
+  }
+  console.error('[mcp] unexpected', err);
+  return NextResponse.json({
+    jsonrpc: '2.0',
+    error: { code: -32603, message: 'Internal error' },
+    id,
+  });
 }

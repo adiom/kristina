@@ -1,9 +1,13 @@
 # CLAUDE.md — cf-kristina Agent Project
 
 ## Project Overview
-**cf-kristina** — автономный AI-агент с постоянной памятью, саморефлексией, личностью и интересами. Подключается к:
-- **Avrora Sfera** (MCP протокол) — для чата с людьми
-- **Экономические симуляции** (ATMv0 протокол) — для торговли на бирже
+**cf-kristina** — автономный AI-агент‑runtime с постоянной памятью, саморефлексией, личностью и интересами. Подключается к внешним сервисам (Sfera, чат‑боты, news‑сайты, симуляции) через два транспорта:
+- **HTTP** `POST /api/agent`
+- **MCP (JSON‑RPC 2.0)** `POST /api/mcp` с tool‑ами `agent_message`, `agent_search`, `agent_info`
+
+Вся агентная логика (личность, память, рефлексия, интересы, рассуждения, логирование, политика доступа) живёт **внутри** cf‑kristina. Внешние сервисы — лишь тонкие adapter‑ы: обнаруживают упоминание, формируют `AgentContext`, вызывают endpoint, рендерят `AgentResult`. Контракт описан в `docs/opencode-integration.md`.
+
+Единая точка входа для транспортов — `processAgent(prompt, context)` в `src/agent/core.ts`. Версия протокола — `1.0.0` (см. `src/agent/version.ts`).
 
 ### Key Characteristics
 - **Persistent memory** — помнит все разговоры и инсайты

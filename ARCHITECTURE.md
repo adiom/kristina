@@ -38,6 +38,31 @@
 
 ## Core Components
 
+### 0. Agent Runtime (processAgent)
+**Purpose**: Single entry point that owns *all* intelligence of the agent.
+
+```typescript
+import { processAgent } from './agent/core';
+
+const result: AgentResult = await processAgent(prompt, context);
+```
+
+The runtime is transport‑agnostic – HTTP (`/api/agent`) and MCP
+(`/api/mcp`) both delegate to it.  It:
+* validates the request via the policy layer,
+* retrieves memory from the allowed namespaces (`own`, `user`, `space`,
+  `service`),
+* builds a system prompt from the personality + event context,
+* runs the LLM,
+* logs the lifecycle in `activity_log`,
+* persists any `memoryToStore` from the result (subject to
+  `memoryAccess.write`),
+* returns a structured `AgentResult`.
+
+External services (Sfera, news sites, chat bots, simulations) only need
+a tiny adapter that builds an `AgentContext` and renders the
+`AgentResult`.  See `docs/opencode-integration.md` for the contract.
+
 ### 1. Context Manager
 **Purpose**: Isolates conversations to prevent cross-user data leakage.
 
@@ -56,6 +81,9 @@ interface IsolatedContext {
 - Each dialogue gets its own context
 - Memory is shared (read), but conversation history is isolated
 - Economic simulations get read-only memory access to prevent contamination
+
+The new `AgentContext` type (see `src/agent/types.ts`) supersedes the
+legacy `IsolatedContext` and is what every transport uses.
 
 ### 2. Memory Store
 **Purpose**: Persistent memory with vector search.

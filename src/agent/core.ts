@@ -1,13 +1,41 @@
+/**
+ * Agent core for cf-kristina.
+ *
+ * This module owns **all** of the agent's intelligence:
+ *   – personality (system prompt)
+ *   – memory retrieval
+ *   – reasoning / LLM call
+ *   – activity logging
+ *   – optional memory persistence
+ *
+ * External transports (HTTP, MCP, WebSocket) must go through
+ * {@link processAgent} – they should not import or instantiate
+ * `ToolLoopAgent` directly.  Keeping a single entry point makes it
+ * trivial to add policy checks, tests or alternate model backends later.
+ */
+
 import { ToolLoopAgent, tool } from 'ai';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { z } from 'zod';
-import { CORE_PERSONALITY } from './personality';
+import { CEO_PERSONALITY } from './personality';
+import type { AgentContext, AgentResult } from './types';
 import {
   searchOwnMemory,
   searchUserMemory,
+  searchSpaceMemory,
+  searchServiceMemory,
   storeOwnMemory,
+  storeUserMemory,
+  storeSpaceMemory,
+  storeServiceMemory,
 } from '../memory/store';
 import { logActivity } from '../transparency';
+import {
+  validateContext,
+  canAccessMemory,
+  assertWriteAllowed,
+  checkRateLimit,
+} from '../policy';
 
 const lmstudio = createOpenAICompatible({
   name: 'lmstudio',
@@ -16,81 +44,63 @@ const lmstudio = createOpenAICompatible({
 
 const model = lmstudio('qwen/qwen3-1.7b');
 
+/**
+ * The agent tool that the LLM can call.  We keep the tools minimal
+ * because all real "thinking" happens in {@link processAgent}; the
+ * tools below just give the LLM a structured way to declare what it
+ * has memorised so the runtime can persist it.
+ */
 const tools = {
   searchOwnMemory: tool({
-    description:
-      'Search your own memory for insights, patterns, knowledge, and past decisions.',
+    description: 'Search the agent own knowledge base for relevant facts.',
     inputSchema: z.object({
       query: z.string().describe('The search query'),
       category: z
         .enum(['insight', 'pattern', 'knowledge', 'decision', 'reflection'])
-        .optional()
-        .describe('Filter by memory category'),
+        .optional(),
     }),
     execute: async ({ query, category }) => {
-      const start = Date.now();
-      try {
-        const results = await searchOwnMemory(query, { category });
-        await logActivity({
-          type: 'memory_searched',
-          channel: 'agent',
-          details: { query, category, count: results.length, scope: 'own' },
-        });
-        return results.map((r) => ({
-          content: r.content,
-          category: r.category,
-          importance: r.importance,
-          similarity: r.similarity,
-        }));
-      } catch (e) {
-        await logActivity({
-          type: 'memory_searched',
-          channel: 'agent',
-          details: { query, category, error: String(e) },
-        });
-        throw e;
-      }
+      const results = await searchOwnMemory(query, { category });
+      await logActivity({
+        type: 'memory_searched',
+        channel: 'agent',
+        details: { query, category, count: results.length, scope: 'own' },
+      });
+      return results.map((r) => ({
+        content: r.content,
+        category: r.category,
+        importance: r.importance,
+        similarity: r.similarity,
+      }));
     },
   }),
 
   searchUserMemory: tool({
-    description:
-      'Search what you know about a specific user (preferences, topics, style, history).',
+    description: 'Search memory about a specific user.',
     inputSchema: z.object({
-      userId: z.string().describe('The user ID to search memory for'),
+      userId: z.string().describe('The user ID'),
       query: z.string().describe('The search query'),
     }),
     execute: async ({ userId, query }) => {
-      const start = Date.now();
-      try {
-        const results = await searchUserMemory(userId, query);
-        await logActivity({
-          type: 'memory_searched',
-          channel: 'agent',
-          details: { userId, query, count: results.length, scope: 'user' },
-        });
-        return results.map((r) => ({
-          content: r.content,
-          category: r.category,
-          importance: r.importance,
-          similarity: r.similarity,
-        }));
-      } catch (e) {
-        await logActivity({
-          type: 'memory_searched',
-          channel: 'agent',
-          details: { userId, query, error: String(e) },
-        });
-        throw e;
-      }
+      const results = await searchUserMemory(userId, query);
+      await logActivity({
+        type: 'memory_searched',
+        channel: 'agent',
+        details: { userId, query, count: results.length, scope: 'user' },
+      });
+      return results.map((r) => ({
+        content: r.content,
+        category: r.category,
+        importance: r.importance,
+        similarity: r.similarity,
+      }));
     },
   }),
 
   storeMemory: tool({
-    description:
-      'Save new information to your memory for future reference. Use this to remember important insights, patterns, or knowledge.',
+    description: 'Persist a new memory entry. Use sparingly.',
     inputSchema: z.object({
-      content: z.string().describe('The content to remember'),
+      content: z.string(),
       category: z.enum([
         'insight',
         'pattern',
@@ -98,39 +108,281 @@ const tools = {
         'decision',
         'reflection',
       ]),
-      importance: z.number().min(1).max(10).describe('Importance score 1-10'),
-      tags: z.array(z.string()).optional().describe('Tags for categorization'),
+      importance: z.number().min(1).max(10),
+      tags: z.array(z.string()).optional(),
     }),
     execute: async ({ content, category, importance, tags }) => {
-      const start = Date.now();
-      try {
-        await storeOwnMemory({ content, category, importance, tags });
-        await logActivity({
-          type: 'memory_stored',
-          channel: 'agent',
-          details: { category, importance, tags, contentLength: content.length },
-        });
-        return { stored: true };
-      } catch (e) {
-        await logActivity({
-          type: 'memory_stored',
-          channel: 'agent',
-          details: { category, error: String(e) },
-        });
-        throw e;
-      }
+      await storeOwnMemory({ content, category, importance, tags });
+      await logActivity({
+        type: 'memory_stored',
+        channel: 'agent',
+        details: { category, importance, tags, contentLength: content.length },
+      });
+      return { stored: true };
     },
   }),
 };
 
 export function createAgent(userId?: string) {
   const instructions = userId
-    ? `${CORE_PERSONALITY}\n\n## Current Context\nYou are speaking with user: ${userId}`
-    : CORE_PERSONALITY;
+    ? `${CEO_PERSONALITY}\n\n## Current Context\nYou are speaking with user: ${userId}`
+    : CEO_PERSONALITY;
 
   return new ToolLoopAgent({
     model,
     instructions,
     tools,
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* Structured processing                                               */
+/* ------------------------------------------------------------------ */
+
+interface RetrievedMemory {
+  id: string;
+  content: string;
+  category: string;
+  importance: number;
+  similarity: number;
+  source: 'own' | 'user' | 'space' | 'service';
+}
+
+async function retrieveMemory(
+  prompt: string,
+  context: AgentContext,
+): Promise<RetrievedMemory[]> {
+  const results: RetrievedMemory[] = [];
+
+  if (canAccessMemory(context, 'own')) {
+    const own = await searchOwnMemory(prompt, { limit: 5 });
+    own.forEach((m) =>
+      results.push({ ...m, source: 'own' as const }),
+    );
+  }
+
+  if (canAccessMemory(context, 'user') && context.userId) {
+    const user = await searchUserMemory(context.userId, prompt, { limit: 5 });
+    user.forEach((m) =>
+      results.push({ ...m, source: 'user' as const }),
+    );
+  }
+
+  if (canAccessMemory(context, 'space')) {
+    const space = await searchSpaceMemory(context.spaceId, prompt, { limit: 5 });
+    space.forEach((m) =>
+      results.push({ ...m, source: 'space' as const }),
+    );
+  }
+
+  if (canAccessMemory(context, 'service')) {
+    const svc = await searchServiceMemory(
+      context.serviceId,
+      prompt,
+      { limit: 5 },
+    );
+    svc.forEach((m) =>
+      results.push({ ...m, source: 'service' as const }),
+    );
+  }
+
+  await logActivity({
+    type: 'memory_searched',
+    channel: context.source,
+    details: {
+      serviceId: context.serviceId,
+      spaceId: context.spaceId,
+      userId: context.userId,
+      count: results.length,
+    },
+  });
+
+  return results;
+}
+
+function buildSystemPrompt(context: AgentContext): string {
+  const lines: string[] = [CEO_PERSONALITY, ''];
+
+  lines.push('## Current Event Context');
+  lines.push(`- source: ${context.source}`);
+  lines.push(`- service: ${context.serviceId}${context.serviceName ? ` (${context.serviceName})` : ''}`);
+  lines.push(`- space: ${context.spaceId}${context.spaceName ? ` (${context.spaceName})` : ''}`);
+  if (context.userId) {
+    lines.push(`- user: ${context.userId}${context.userName ? ` (${context.userName})` : ''}`);
+  }
+  lines.push(`- trigger: ${context.trigger}`);
+  lines.push(`- responseMode: ${context.responseMode}`);
+
+  const allowedNamespaces = (
+    Object.keys(context.memoryAccess) as Array<keyof typeof context.memoryAccess>
+  ).filter((k) => k !== 'write' && (context.memoryAccess as any)[k]);
+  lines.push(`- allowed memory namespaces: ${allowedNamespaces.join(', ') || 'none'}`);
+  lines.push(`- write allowed: ${context.memoryAccess.write}`);
+
+  if (context.conversationHistory && context.conversationHistory.length > 0) {
+    lines.push('', '## Recent Conversation');
+    for (const m of context.conversationHistory.slice(-5)) {
+      const who = m.author || m.role;
+      lines.push(`- [${m.role}] ${who}: ${m.content}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Persist any memories the agent decided to store.  The runtime respects
+ * {@link AgentContext.memoryAccess.write}: writes are silently skipped
+ * (not an error) if the service asked for a read‑only context.
+ */
+async function persistResultMemory(
+  result: AgentResult,
+  context: AgentContext,
+) {
+  if (!result.memoryToStore || result.memoryToStore.length === 0) return;
+  if (!context.memoryAccess.write) return;
+
+  for (const entry of result.memoryToStore) {
+    try {
+      if (canAccessMemory(context, 'user') && context.userId) {
+        await storeUserMemory(context.userId, {
+          content: entry.content,
+          category: entry.category as any,
+          importance: entry.importance,
+          tags: entry.tags,
+          spaceId: context.spaceId,
+          service: context.serviceId,
+        });
+      } else if (canAccessMemory(context, 'space')) {
+        await storeSpaceMemory(context.spaceId, {
+          content: entry.content,
+          category: entry.category as any,
+          importance: entry.importance,
+          tags: entry.tags,
+          userId: context.userId ?? null,
+          service: context.serviceId,
+        });
+      } else if (canAccessMemory(context, 'service')) {
+        await storeServiceMemory(context.serviceId, {
+          content: entry.content,
+          category: entry.category as any,
+          importance: entry.importance,
+          tags: entry.tags,
+          userId: context.userId ?? null,
+          spaceId: context.spaceId,
+        });
+      } else {
+        await storeOwnMemory({
+          content: entry.content,
+          category: entry.category as any,
+          importance: entry.importance,
+          tags: entry.tags,
+          spaceId: context.spaceId,
+          service: context.serviceId,
+        });
+      }
+    } catch (err) {
+      // Persistence failures must never break the user‑visible response.
+      console.error('[processAgent] memory persist failed', err);
+    }
+  }
+}
+
+/**
+ * The single entry point every transport (HTTP / MCP / WebSocket) should
+ * use.  It performs validation, rate limiting, memory retrieval, the
+ * LLM call, logging, and optional memory persistence, and returns a
+ * structured {@link AgentResult}.
+ */
+export async function processAgent(
+  prompt: string,
+  context: AgentContext,
+): Promise<AgentResult> {
+  validateContext(context);
+  checkRateLimit(context.serviceId);
+
+  await logActivity({
+    type: 'message_received',
+    channel: context.source,
+    details: {
+      serviceId: context.serviceId,
+      spaceId: context.spaceId,
+      userId: context.userId,
+      promptLength: prompt.length,
+    },
+  });
+
+  const memories = await retrieveMemory(prompt, context);
+
+  const systemPrompt = buildSystemPrompt(context);
+
+  // Build a single prompt that injects the retrieved memory snippets
+  // (the LLM does not need to call any tool for the MVP – everything it
+  // needs is in front of it).  We still keep the tool definitions in
+  // case a future model chooses to call them.
+  const memorySnippet = memories
+    .map(
+      (m) =>
+        `- [${m.source}/${m.category}] (sim=${m.similarity.toFixed(2)}) ${m.content}`,
+    )
+    .join('\n');
+
+  const fullPrompt = `${prompt}
+
+## Retrieved Memory
+${memorySnippet || '(no relevant memory)'}`;
+
+  const agent = new ToolLoopAgent({
+    model,
+    instructions: systemPrompt,
+    tools,
+  });
+
+  const llm = await agent.generate({ prompt: fullPrompt });
+  const text = llm.text || '';
+
+  // Best‑effort structured parsing.  If the model returns pure prose we
+  // still produce a valid `AgentResult`.
+  const result: AgentResult = {
+    text,
+    type: 'message',
+    confidence: undefined,
+    sources: memories.map((m) => ({
+      id: m.id,
+      snippet: m.content,
+      similarity: m.similarity,
+    })),
+    metadata: {
+      model: 'qwen/qwen3-1.7b',
+      serviceId: context.serviceId,
+      spaceId: context.spaceId,
+    },
+  };
+
+  await logActivity({
+    type: 'decision_made',
+    channel: context.source,
+    details: {
+      serviceId: context.serviceId,
+      spaceId: context.spaceId,
+      userId: context.userId,
+      memoryUsed: memories.length,
+    },
+  });
+
+  // Persist any new knowledge the agent decided to record.
+  await persistResultMemory(result, context);
+
+  await logActivity({
+    type: 'message_sent',
+    channel: context.source,
+    details: {
+      serviceId: context.serviceId,
+      spaceId: context.spaceId,
+      userId: context.userId,
+      textLength: result.text.length,
+    },
+  });
+
+  return result;
 }

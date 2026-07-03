@@ -21,6 +21,8 @@ export const memory = pgTable(
     importance: integer('importance').notNull(),
     tags: text('tags').array().default([]),
     userId: uuid('user_id'),
+    spaceId: uuid('space_id'),
+    service: text('service'),
     context: jsonb('context').$type<{
       channel?: string;
       emotionalTone?: string;
@@ -31,6 +33,8 @@ export const memory = pgTable(
   },
   (t) => [
     index('memory_user_id_idx').on(t.userId),
+    index('memory_space_id_idx').on(t.spaceId),
+    index('memory_service_idx').on(t.service),
     index('memory_category_idx').on(t.category),
     index('memory_created_at_idx').on(t.createdAt),
   ]

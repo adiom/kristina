@@ -8,6 +8,13 @@
       "when": 1783074595388,
       "tag": "0000_wealthy_shooting_star",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1783087151648,
+      "tag": "0001_condemned_sir_ram",
+      "breakpoints": true
     }
   ]
 }
