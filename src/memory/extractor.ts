@@ -196,6 +196,7 @@ export async function persistAutoMemories(
           category: mem.category,
           importance: mem.importance,
           tags: mem.tags,
+          vaultId: context.vaultId,
           spaceId: context.spaceId,
           service: context.serviceId,
         });
@@ -248,6 +249,7 @@ export async function persistExplicitMemory(
         category: 'knowledge',
         importance: 9, // High importance for explicit requests
         tags: ['explicit', 'user-request'],
+        vaultId: context.vaultId,
         spaceId: context.spaceId,
         service: context.serviceId,
       });

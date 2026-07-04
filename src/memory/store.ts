@@ -28,6 +28,7 @@ function getLmStudio() {
 
 interface SearchOptions {
   userId?: string | null;
+  vaultId?: string | null;
   spaceId?: string | null;
   service?: string | null;
   category?: string;
@@ -40,6 +41,7 @@ interface StoreEntry {
   category: 'insight' | 'pattern' | 'knowledge' | 'decision' | 'reflection';
   importance: number;
   tags?: string[];
+  vaultId?: string | null;
   userId?: string | null;
   spaceId?: string | null;
   service?: string | null;
@@ -150,6 +152,7 @@ export async function storeOwnMemory(entry: StoreEntry) {
     category: entry.category,
     importance: entry.importance,
     tags: entry.tags || [],
+    vaultId: entry.vaultId ?? null,
     userId: null,
     spaceId: entry.spaceId ? stringToUuid(entry.spaceId) : null,
     service: entry.service ?? null,
@@ -173,6 +176,7 @@ export async function storeUserMemory(
     category: entry.category,
     importance: entry.importance,
     tags: entry.tags || [],
+    vaultId: entry.vaultId ?? null,
     userId: stringToUuid(userId),
     spaceId: entry.spaceId ? stringToUuid(entry.spaceId) : null,
     service: entry.service ?? null,
@@ -196,6 +200,7 @@ export async function storeSpaceMemory(
     category: entry.category,
     importance: entry.importance,
     tags: entry.tags || [],
+    vaultId: entry.vaultId ?? null,
     userId: entry.userId ? stringToUuid(entry.userId) : null,
     spaceId: stringToUuid(spaceId),
     service: entry.service ?? null,
@@ -219,6 +224,7 @@ export async function storeServiceMemory(
     category: entry.category,
     importance: entry.importance,
     tags: entry.tags || [],
+    vaultId: entry.vaultId ?? null,
     userId: entry.userId ?? null,
     spaceId: entry.spaceId ?? null,
     service: serviceId,
@@ -295,6 +301,10 @@ async function searchMemory(query: string, options: SearchOptions) {
     // If no userId specified, exclude user‑scoped rows so the agent
     // never accidentally sees another user's private memories.
     conditions.push(isNull(memory.userId));
+  }
+
+  if (options.vaultId) {
+    conditions.push(eq(memory.vaultId, options.vaultId));
   }
 
   if (options.spaceId) {

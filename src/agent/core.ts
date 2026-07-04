@@ -44,6 +44,12 @@ import {
   persistAutoMemories,
   persistExplicitMemory,
 } from '../memory/extractor';
+import {
+  completeVaultOnboarding,
+  ensureUserVault,
+  registerAttachmentsAsVaultItems,
+  type UserVaultSession,
+} from '../vault';
 
 // Provider selection: GROQ (cloud, faster, larger models) or LM Studio (local)
 const provider = process.env.LLM_PROVIDER || 'lmstudio';
@@ -53,7 +59,7 @@ function getModel() {
     const groq = createGroq({
       apiKey: process.env.GROQ_API_KEY,
     });
-    return groq('qwen/qwen3-32b');
+    return groq('openai/gpt-oss-120b');
   }
   // Default: LM Studio (local)
   const lmstudio = createOpenAICompatible({
@@ -231,7 +237,23 @@ async function retrieveMemory(
   return unique;
 }
 
-function buildSystemPrompt(context: AgentContext): string {
+function buildAttachmentContext(context: AgentContext): string[] {
+  if (!context.attachments || context.attachments.length === 0) return [];
+
+  return [
+    '',
+    '## Attachments',
+    ...context.attachments.map((attachment, index) => {
+      const location = attachment.storageKey ?? attachment.url ?? attachment.source;
+      return `- [${index + 1}] ${attachment.type}: ${attachment.title}${attachment.mimeType ? ` (${attachment.mimeType})` : ''}${location ? `, location: ${location}` : ''}`;
+    }),
+  ];
+}
+
+function buildSystemPrompt(
+  context: AgentContext,
+  vaultSession?: UserVaultSession,
+): string {
   const lines: string[] = [CEO_PERSONALITY, ''];
 
   lines.push('## Current Event Context');
@@ -240,6 +262,10 @@ function buildSystemPrompt(context: AgentContext): string {
   lines.push(`- space: ${context.spaceId}${context.spaceName ? ` (${context.spaceName})` : ''}`);
   if (context.userId) {
     lines.push(`- user: ${context.userId}${context.userName ? ` (${context.userName})` : ''}`);
+  }
+  if (vaultSession) {
+    lines.push(`- vault: ${vaultSession.vaultId}`);
+    lines.push(`- vault onboarding: ${vaultSession.onboardingStatus}`);
   }
   lines.push(`- trigger: ${context.trigger}`);
   lines.push(`- responseMode: ${context.responseMode}`);
@@ -258,7 +284,63 @@ function buildSystemPrompt(context: AgentContext): string {
     }
   }
 
+  lines.push(...buildAttachmentContext(context));
+
+  if (vaultSession?.isNewVault) {
+    lines.push(
+      '',
+      '## First Contact Vault Onboarding',
+      'This is a new personal vault for this user.',
+      'Ask exactly one short question to learn what should be remembered about this person.',
+      'Do not ask for secrets, passwords, API keys, private keys, or sensitive credentials.',
+    );
+  }
+
   return lines.join('\n');
+}
+
+async function persistVaultOnboardingAnswer(
+  prompt: string,
+  context: AgentContext,
+  vaultSession?: UserVaultSession,
+) {
+  if (!vaultSession || vaultSession.isNewVault) return;
+  if (vaultSession.onboardingStatus !== 'pending') return;
+  if (!context.memoryAccess.write || !context.userId) return;
+
+  await storeUserMemory(context.userId, {
+    content: `First profile note from user: ${prompt}`,
+    category: 'knowledge',
+    importance: 8,
+    tags: ['vault', 'onboarding', 'profile'],
+    vaultId: vaultSession.vaultId,
+    spaceId: context.spaceId,
+    service: context.serviceId,
+  });
+  await completeVaultOnboarding(vaultSession.vaultId);
+}
+
+async function registerRuntimeAttachments(context: AgentContext): Promise<void> {
+  if (!context.vaultId || !context.attachments || context.attachments.length === 0) {
+    return;
+  }
+
+  await registerAttachmentsAsVaultItems(
+    context.vaultId,
+    context.attachments,
+    context.userId,
+  );
+}
+
+const ONBOARDING_QUESTION = 'Чтобы мне лучше запомнить тебя в личном vault, расскажи в одном-двух предложениях: чем ты занимаешься и что для тебя сейчас важно?';
+
+function appendOnboardingQuestionIfNeeded(
+  text: string,
+  vaultSession?: UserVaultSession,
+): string {
+  if (!vaultSession?.isNewVault) return text;
+  if (text.trim().endsWith('?')) return text;
+  return `${text.trim()}\n\n${ONBOARDING_QUESTION}`.trim();
 }
 
 /**
@@ -281,6 +363,7 @@ async function persistResultMemory(
           category: entry.category as any,
           importance: entry.importance,
           tags: entry.tags,
+          vaultId: context.vaultId,
           spaceId: context.spaceId,
           service: context.serviceId,
         });
@@ -290,6 +373,7 @@ async function persistResultMemory(
           category: entry.category as any,
           importance: entry.importance,
           tags: entry.tags,
+          vaultId: context.vaultId,
           userId: context.userId ?? null,
           service: context.serviceId,
         });
@@ -299,6 +383,7 @@ async function persistResultMemory(
           category: entry.category as any,
           importance: entry.importance,
           tags: entry.tags,
+          vaultId: context.vaultId,
           userId: context.userId ?? null,
           spaceId: context.spaceId,
         });
@@ -308,6 +393,7 @@ async function persistResultMemory(
           category: entry.category as any,
           importance: entry.importance,
           tags: entry.tags,
+          vaultId: context.vaultId,
           spaceId: context.spaceId,
           service: context.serviceId,
         });
@@ -332,20 +418,36 @@ export async function processAgent(
   validateContext(context);
   checkRateLimit(context.serviceId);
 
+  const vaultSession = context.userId
+    ? await ensureUserVault(context.userId, {
+        displayName: context.userName,
+        serviceId: context.serviceId,
+        spaceId: context.spaceId,
+      })
+    : undefined;
+  const runtimeContext: AgentContext = vaultSession
+    ? { ...context, vaultId: vaultSession.vaultId }
+    : context;
+
+  await registerRuntimeAttachments(runtimeContext);
+  await persistVaultOnboardingAnswer(prompt, runtimeContext, vaultSession);
+
   await logActivity({
     type: 'message_received',
     channel: context.source,
     details: {
-      serviceId: context.serviceId,
-      spaceId: context.spaceId,
-      userId: context.userId,
+      serviceId: runtimeContext.serviceId,
+      spaceId: runtimeContext.spaceId,
+      userId: runtimeContext.userId,
+      vaultId: runtimeContext.vaultId,
+      attachmentsCount: runtimeContext.attachments?.length ?? 0,
       promptLength: prompt.length,
     },
   });
 
-  const memories = await retrieveMemory(prompt, context);
+  const memories = await retrieveMemory(prompt, runtimeContext);
 
-  const systemPrompt = buildSystemPrompt(context);
+  const systemPrompt = buildSystemPrompt(runtimeContext, vaultSession);
 
   // Build a single prompt that injects the retrieved memory snippets
   // (the LLM does not need to call any tool for the MVP – everything it
@@ -357,6 +459,13 @@ export async function processAgent(
     .map((m) => `- ${m.content}`)
     .join('\n');
 
+  const onboardingPrompt = vaultSession?.isNewVault
+    ? `
+
+## ОБЯЗАТЕЛЬНО ДЛЯ НОВОГО VAULT
+В конце ответа задай ровно один короткий вопрос о человеке: ${ONBOARDING_QUESTION}`
+    : '';
+
   const fullPrompt = `${prompt}
 
 ## Retrieved Memory (используй ТОЛЬКО если directly relevant к вопросу)
@@ -365,7 +474,7 @@ ${memorySnippet || '(no relevant memory)'}
 ## ВАЖНО
 - Отвечай на вопрос пользователя, а не на содержимое памяти
 - Память — это контекст, а не ответ
-- Если вопрос про "что видишь" — опиши текущую ситуацию/контекст, а не facts из памяти`;
+- Если вопрос про "что видишь" — опиши текущую ситуацию/контекст, а не facts из памяти${onboardingPrompt}`;
 
   console.log('=== LLM DEBUG ===');
   console.log('System Prompt:\n', systemPrompt);
@@ -379,7 +488,7 @@ ${memorySnippet || '(no relevant memory)'}
   });
 
   const llm = await agent.generate({ prompt: fullPrompt });
-  const text = llm.text || '';
+  const text = appendOnboardingQuestionIfNeeded(llm.text || '', vaultSession);
 
   // Best‑effort structured parsing.  If the model returns pure prose we
   // still produce a valid `AgentResult`.
@@ -393,10 +502,19 @@ ${memorySnippet || '(no relevant memory)'}
       similarity: m.similarity,
     })),
     metadata: {
-      model: provider === 'groq' ? 'qwen/qwen3-32b' : 'qwen/qwen3-1.7b',
+      model: provider === 'groq' ? 'openai/gpt-oss-120b' : 'qwen/qwen3-1.7b',
       provider,
-      serviceId: context.serviceId,
-      spaceId: context.spaceId,
+      serviceId: runtimeContext.serviceId,
+      spaceId: runtimeContext.spaceId,
+      vaultId: vaultSession?.vaultId,
+      isNewVault: vaultSession?.isNewVault,
+      vaultOnboardingStatus: vaultSession?.onboardingStatus,
+      attachments: runtimeContext.attachments?.map((attachment) => ({
+        type: attachment.type,
+        title: attachment.title,
+        storageKey: attachment.storageKey,
+        url: attachment.url,
+      })),
     },
   };
 
@@ -404,24 +522,25 @@ ${memorySnippet || '(no relevant memory)'}
     type: 'decision_made',
     channel: context.source,
     details: {
-      serviceId: context.serviceId,
-      spaceId: context.spaceId,
-      userId: context.userId,
+      serviceId: runtimeContext.serviceId,
+      spaceId: runtimeContext.spaceId,
+      userId: runtimeContext.userId,
+      vaultId: runtimeContext.vaultId,
       memoryUsed: memories.length,
     },
   });
 
   // Persist any new knowledge the agent decided to record.
-  await persistResultMemory(result, context);
+  await persistResultMemory(result, runtimeContext);
 
   // Auto-extract significant memories from the conversation
-  if (context.memoryAccess.write) {
+  if (runtimeContext.memoryAccess.write) {
     try {
       // Check if user explicitly asked to remember something
       if (isExplicitMemoryRequest(prompt)) {
         const explicitContent = extractExplicitContent(prompt);
         if (explicitContent.length > 5) {
-          const saved = await persistExplicitMemory(explicitContent, context);
+          const saved = await persistExplicitMemory(explicitContent, runtimeContext);
           if (saved) {
             console.log('[processAgent] Explicit memory saved:', explicitContent);
           }
@@ -429,9 +548,9 @@ ${memorySnippet || '(no relevant memory)'}
       }
 
       // Auto-extract memories from the conversation
-      const autoMemories = await extractMemories(prompt, text, context);
+      const autoMemories = await extractMemories(prompt, text, runtimeContext);
       if (autoMemories.length > 0) {
-        await persistAutoMemories(autoMemories, context);
+        await persistAutoMemories(autoMemories, runtimeContext);
         console.log(`[processAgent] Auto-extracted ${autoMemories.length} memories`);
       }
     } catch (err) {
@@ -444,9 +563,10 @@ ${memorySnippet || '(no relevant memory)'}
     type: 'message_sent',
     channel: context.source,
     details: {
-      serviceId: context.serviceId,
-      spaceId: context.spaceId,
-      userId: context.userId,
+      serviceId: runtimeContext.serviceId,
+      spaceId: runtimeContext.spaceId,
+      userId: runtimeContext.userId,
+      vaultId: runtimeContext.vaultId,
       textLength: result.text.length,
     },
   });

@@ -42,6 +42,19 @@ export interface ConversationMessage {
   content: string;
 }
 
+export interface AgentAttachment {
+  type: 'file' | 'image' | 'document' | 'artifact';
+  source: 'storage' | 'url' | 'base64' | 'vault_item';
+  title: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  storageKey?: string;
+  url?: string;
+  data?: string;
+  sha256?: string;
+  metadata?: Record<string, unknown>;
+}
+
 /**
  * The full event payload an external service sends to the agent.
  *
@@ -62,6 +75,10 @@ export interface AgentContext {
   /** User identifier within the service. */
   userId?: string;
   userName?: string;
+  /** Runtime-created personal vault ID for this user. */
+  vaultId?: string;
+  /** Files or artifacts supplied with the current message. */
+  attachments?: AgentAttachment[];
   /** Last few messages for situational awareness. */
   conversationHistory?: ConversationMessage[];
   /** Why the agent is being called. */

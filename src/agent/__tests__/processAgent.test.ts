@@ -51,7 +51,19 @@ jest.mock('../../transparency', () => ({
   logActivity: jest.fn(async () => {}),
 }));
 
+jest.mock('../../vault', () => ({
+  ensureUserVault: jest.fn(async (globalUserId: string) => ({
+    vaultId: 'vault-1',
+    globalUserId,
+    isNewVault: false,
+    onboardingStatus: 'completed',
+  })),
+  completeVaultOnboarding: jest.fn(async () => {}),
+  registerAttachmentsAsVaultItems: jest.fn(async () => []),
+}));
+
 import * as store from '../../memory/store';
+import * as vault from '../../vault';
 import { processAgent } from '../core';
 import type { AgentContext } from '../types';
 
@@ -98,5 +110,96 @@ describe('processAgent', () => {
     expect(store.storeUserMemory).not.toHaveBeenCalled();
     expect(store.storeSpaceMemory).not.toHaveBeenCalled();
     expect(store.storeServiceMemory).not.toHaveBeenCalled();
+  });
+
+  it('creates or touches a vault when userId is present', async () => {
+    const result = await processAgent('hello', {
+      ...baseContext,
+      userId: 'global-user-1',
+      userName: 'Alice',
+    });
+
+    expect(vault.ensureUserVault).toHaveBeenCalledWith('global-user-1', {
+      displayName: 'Alice',
+      serviceId: 'test-svc',
+      spaceId: 'space-1',
+    });
+    expect(result.metadata?.vaultId).toBe('vault-1');
+  });
+
+  it('stores first onboarding answer for pending existing vaults', async () => {
+    jest.mocked(vault.ensureUserVault).mockResolvedValueOnce({
+      vaultId: 'vault-pending',
+      globalUserId: 'global-user-2',
+      isNewVault: false,
+      onboardingStatus: 'pending',
+    });
+
+    await processAgent('я занимаюсь исследованием рынков', {
+      ...baseContext,
+      userId: 'global-user-2',
+      memoryAccess: { ...baseContext.memoryAccess, user: true, write: true },
+    });
+
+    expect(store.storeUserMemory).toHaveBeenCalledWith(
+      'global-user-2',
+      expect.objectContaining({
+        content: 'First profile note from user: я занимаюсь исследованием рынков',
+        tags: ['vault', 'onboarding', 'profile'],
+      }),
+    );
+    expect(vault.completeVaultOnboarding).toHaveBeenCalledWith('vault-pending');
+  });
+
+  it('registers attachments in vault and exposes them in metadata', async () => {
+    const result = await processAgent('посмотри файл', {
+      ...baseContext,
+      userId: 'global-user-3',
+      attachments: [
+        {
+          type: 'document',
+          source: 'storage',
+          title: 'contract.pdf',
+          mimeType: 'application/pdf',
+          storageKey: 'vaults/global-user-3/contract.pdf',
+        },
+      ],
+    });
+
+    expect(vault.registerAttachmentsAsVaultItems).toHaveBeenCalledWith(
+      'vault-1',
+      [
+        expect.objectContaining({
+          type: 'document',
+          title: 'contract.pdf',
+        }),
+      ],
+      'global-user-3',
+    );
+    expect(result.metadata?.attachments).toEqual([
+      {
+        type: 'document',
+        title: 'contract.pdf',
+        storageKey: 'vaults/global-user-3/contract.pdf',
+        url: undefined,
+      },
+    ]);
+  });
+
+  it('appends onboarding question for new vaults when model ignores it', async () => {
+    jest.mocked(vault.ensureUserVault).mockResolvedValueOnce({
+      vaultId: 'vault-new',
+      globalUserId: 'global-user-4',
+      isNewVault: true,
+      onboardingStatus: 'pending',
+    });
+
+    const result = await processAgent('Поздоровайся и расскажи о себе', {
+      ...baseContext,
+      userId: 'global-user-4',
+    });
+
+    expect(result.text).toContain('чем ты занимаешься');
+    expect(result.text).toContain('что для тебя сейчас важно?');
   });
 });

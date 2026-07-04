@@ -47,6 +47,23 @@
 
 ## Priority: Medium
 
+### Vault — user storage 🚀
+- [ ] Define `vault` model separately from semantic memory
+- [ ] Introduce canonical `globalUserId` across all client apps
+- [ ] Enforce server-side `userId` trust (no raw client userId)
+- [ ] Create `cf_kristina_vaults` table
+- [ ] Create `cf_kristina_vault_items` table for files/artifacts/memory refs
+- [ ] Create `cf_kristina_vault_events` for audit
+- [ ] Add vault creation on first `globalUserId`
+- [ ] Add first-contact onboarding flow for new vault owners
+- [ ] Store user media in object storage, not Postgres blobs
+- [ ] Store vault metadata in DB only
+- [ ] Connect vault to existing user-memory namespace
+- [ ] Map `context.userId -> vaultId` in processAgent
+- [ ] Add vault-aware memory extraction for first user answers
+- [ ] Add vault-aware prompts for onboarding question
+- [ ] Add tests for vault creation + onboarding flow
+
 ### In Progress 🔄
 - [ ] Scheduled reflection triggers (cron/scheduler)
 - [ ] Interest auto-generation from memory analysis
@@ -71,6 +88,31 @@
 - [ ] Integration tests for reflection cycle
 - [ ] E2E tests for chat flow
 - [ ] Load testing for vector search
+
+---
+
+## Vault & User Identity
+
+- [ ] Pick stable global user ID source from auth system
+- [ ] Ensure one `globalUserId` maps to one vault
+- [ ] Use vault as container for:
+  - memory about user
+  - user-uploaded media/files
+  - agent-created artifacts
+- [ ] Do NOT store media blobs in main DB
+- [ ] Keep DB as metadata layer only
+- [ ] Add vault metadata fields:
+  - `createdAt`
+  - `onboardingStatus`
+  - `lastSeenAt`
+  - `status`
+- [ ] Add vault items lifecycle: created, uploaded, referenced, archived
+- [ ] Add onboarding state machine:
+  1. no vault
+  2. create vault
+  3. ask first question
+  4. save first profile data
+  5. mark onboarding completed
 
 ---
 

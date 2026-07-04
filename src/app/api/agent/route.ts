@@ -14,7 +14,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { processAgent } from '@/agent/core';
 import { PROTOCOL_VERSION } from '@/agent/version';
 import { PolicyError } from '@/policy';
-import type { AgentContext } from '@/agent/types';
+import type { AgentAttachment, AgentContext } from '@/agent/types';
 
 export async function POST(request: NextRequest) {
   let body: any;
@@ -27,7 +27,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const { prompt, context } = body || {};
+  const { prompt, context, attachments } = body || {};
   if (typeof prompt !== 'string' || prompt.length === 0) {
     return NextResponse.json(
       { error: { code: 'missing_prompt', message: 'prompt is required' } },
@@ -41,8 +41,18 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  if (attachments !== undefined && !Array.isArray(attachments)) {
+    return NextResponse.json(
+      { error: { code: 'invalid_attachments', message: 'attachments must be an array' } },
+      { status: 400 },
+    );
+  }
+
   try {
-    const result = await processAgent(prompt, context as AgentContext);
+    const result = await processAgent(prompt, {
+      ...(context as AgentContext),
+      attachments: attachments as AgentAttachment[] | undefined,
+    });
     return NextResponse.json(result, {
       headers: { 'X-Agent-Version': PROTOCOL_VERSION },
     });

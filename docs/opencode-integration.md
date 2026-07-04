@@ -56,6 +56,19 @@ interface AgentContext {
     write: boolean;
   };
 }
+
+interface AgentAttachment {
+  type: 'file' | 'image' | 'document' | 'artifact';
+  source: 'storage' | 'url' | 'base64' | 'vault_item';
+  title: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  storageKey?: string;
+  url?: string;
+  data?: string;
+  sha256?: string;
+  metadata?: Record<string, unknown>;
+}
 ```
 
 * **`memoryAccess`** is the isolation contract – toggle flags to tell
@@ -92,6 +105,16 @@ X-Agent-Version: 1.0.0
 
 {
   "prompt": "@kristina собери новости опираясь на свои интересы",
+  "attachments": [
+    {
+      "type": "document",
+      "source": "storage",
+      "title": "brief.pdf",
+      "mimeType": "application/pdf",
+      "sizeBytes": 123456,
+      "storageKey": "vaults/user-42/brief.pdf"
+    }
+  ],
   "context": {
     "source": "http",
     "serviceId": "news-site-xyz",
@@ -178,6 +201,8 @@ The MCP `initialize` response includes `protocolVersion: "1.0.0"` and
    * `memoryAccess` (start with all `true`; flip off if you want a
      read‑only interaction or to forbid persistence).
 5. **Call the endpoint** – `POST /api/agent` or MCP `agent_message`.
+   Files should usually be uploaded by your service to object storage first,
+   then passed to Kristina as `attachments` metadata in the same message.
 6. **Render the answer** – replace the placeholder with `result.text`.
    Optionally show `result.sources` as "References".
 7. **Handle failures**:

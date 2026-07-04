@@ -15,6 +15,20 @@
       "when": 1783087151648,
       "tag": "0001_condemned_sir_ram",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1783090000000,
+      "tag": "0002_add_user_vaults",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1783113497743,
+      "tag": "0003_clean_masque",
+      "breakpoints": true
     }
   ]
 }
