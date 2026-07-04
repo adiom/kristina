@@ -101,8 +101,13 @@ pnpm db:studio    # Open Drizzle Studio
 # Database (PostgreSQL + pgvector)
 DATABASE_URL=postgresql://...
 
-# LLM + Embeddings (local OpenAI-compatible endpoint, e.g. LM Studio)
+# LLM (local OpenAI-compatible endpoint, e.g. LM Studio)
+LLM_PROVIDER=lmstudio
 LM_STUDIO_URL=http://localhost:1234/v1
+
+# Embeddings (Ollama OpenAI-compatible endpoint)
+OLLAMA_URL=http://localhost:11434/v1
+OLLAMA_EMBED_MODEL=nomic-embed-text:latest
 ```
 
 ## License

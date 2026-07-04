@@ -72,9 +72,29 @@ export interface AgentContext {
   /** Identifier of the conversation space (sfera id, chat id, simulation id). */
   spaceId: string;
   spaceName?: string;
-  /** User identifier within the service. */
+  /**
+   * Per-service user identifier (e.g. telegram user id, sfera user id).
+   * Combined with `serviceId` it forms a unique `localUserKey`.
+   */
   userId?: string;
   userName?: string;
+  /**
+   * Cross-service stable identifier of the person behind `userId`.  When
+   * the dashboard links a Telegram account to a Sfera account, the
+   * `globalUserId` of the existing vault is reused here so the two
+   * identities share one vault.  If omitted, the runtime resolves the
+   * global id from the `vault_identity_links` table, falling back to
+   * `userId` so legacy single-service callers keep working.
+   */
+  globalUserId?: string;
+  /**
+   * Optional list of linked service identities that should be associated
+   * with the resolved vault.  Used by the dashboard linking flow and by
+   * adapters that already know about cross-service links.  The runtime
+   * upserts them as `vault_identity_links` and updates `vaults.displayName`
+   * when a previously unknown name is seen.
+   */
+  identityLinks?: AgentIdentityLink[];
   /** Runtime-created personal vault ID for this user. */
   vaultId?: string;
   /** Files or artifacts supplied with the current message. */
@@ -113,6 +133,19 @@ export interface AgentSourceRef {
 export interface AgentAction {
   tool: string;
   args: Record<string, unknown>;
+}
+
+/**
+ * A cross-service reference to a person.  The dashboard linking flow
+ * creates these when a user asks Kristina to merge two accounts (e.g.
+ * Telegram and Sfera) into one vault.
+ */
+export interface AgentIdentityLink {
+  serviceId: string;
+  userId: string;
+  userName?: string;
+  /** Whether this link is the primary identity for the person. */
+  primary?: boolean;
 }
 
 /**

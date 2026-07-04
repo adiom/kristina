@@ -19,12 +19,19 @@ import { eq, and, desc, sql, isNull, isNotNull } from 'drizzle-orm';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { embed } from 'ai';
 
-function getLmStudio() {
+// Embeddings run locally via Ollama (nomic-embed-text, 768-dim).
+// LM Studio endpoint is reserved for chat completions if/when we go
+// back to a local LLM.
+function getEmbeddingsProvider() {
   return createOpenAICompatible({
-    name: 'lmstudio',
-    baseURL: process.env.LM_STUDIO_URL || 'http://localhost:1234/v1',
+    name: 'ollama',
+    baseURL: process.env.OLLAMA_URL || 'http://localhost:11434/v1',
   });
 }
+
+const EMBEDDING_MODEL =
+  process.env.OLLAMA_EMBED_MODEL || 'nomic-embed-text:latest';
+const EMBEDDING_DIM = 768;
 
 interface SearchOptions {
   userId?: string | null;
@@ -103,34 +110,43 @@ function stringToUuid(input: string): string {
 
 async function generateEmbedding(text: string): Promise<number[]> {
   try {
-    const lmstudio = getLmStudio();
-    const embeddingModel = lmstudio.embeddingModel(
-      process.env.EMBEDDING_MODEL || 'text-embedding-nomic-embed-text-v1.5'
-    );
+    const provider = getEmbeddingsProvider();
+    const embeddingModel = provider.embeddingModel(EMBEDDING_MODEL);
 
-    // Add 5-second timeout for embedding generation
-    const embeddingPromise = embed({
-      model: embeddingModel,
-      value: text,
-    });
-
+    // 5-second timeout: ollama is local and fast, but we still don't
+    // want to block a chat turn forever.
+    const embeddingPromise = embed({ model: embeddingModel, value: text });
     const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Embedding timeout')), 5000)
+      setTimeout(() => reject(new Error('Embedding timeout')), 5000),
     );
 
-    const { embedding } = await Promise.race([embeddingPromise, timeoutPromise]);
-    return embedding;
+    const { embedding } = await Promise.race([
+      embeddingPromise,
+      timeoutPromise,
+    ]);
+    const vec = embedding as number[];
+    if (vec.length !== EMBEDDING_DIM) {
+      console.warn(
+        `[memory] embedding dim mismatch: got ${vec.length}, expected ${EMBEDDING_DIM}`,
+      );
+    }
+    return vec;
   } catch (err) {
-    console.warn('[generateEmbedding] Failed, using random fallback:', (err as Error).message);
-    // Generate a deterministic random embedding based on text hash
-    const fallback: number[] = [];
+    console.warn(
+      '[generateEmbedding] Failed, using deterministic fallback:',
+      (err as Error).message,
+    );
+    // Deterministic 768-dim fallback so the store still works while
+    // ollama is warming up / offline.  Quality is poor (not semantic),
+    // but writes never crash.
+    const fallback: number[] = new Array(EMBEDDING_DIM);
     let hash = 0;
     for (let i = 0; i < text.length; i++) {
       hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
     }
-    for (let i = 0; i < 768; i++) {
+    for (let i = 0; i < EMBEDDING_DIM; i++) {
       hash = ((hash << 5) - hash + i) | 0;
-      fallback.push((Math.sin(hash) * 10000) % 1);
+      fallback[i] = Math.sin(hash) * 10000 % 1;
     }
     return fallback;
   }
@@ -225,8 +241,8 @@ export async function storeServiceMemory(
     importance: entry.importance,
     tags: entry.tags || [],
     vaultId: entry.vaultId ?? null,
-    userId: entry.userId ?? null,
-    spaceId: entry.spaceId ?? null,
+    userId: entry.userId ? stringToUuid(entry.userId) : null,
+    spaceId: entry.spaceId ? stringToUuid(entry.spaceId) : null,
     service: serviceId,
     context: entry.context || {},
     embedding,

@@ -19,7 +19,7 @@ import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { createGroq } from '@ai-sdk/groq';
 import { z } from 'zod';
 import { CEO_PERSONALITY } from './personality';
-import type { AgentContext, AgentResult } from './types';
+import type { AgentContext, AgentIdentityLink, AgentResult } from './types';
 import {
   searchOwnMemory,
   searchUserMemory,
@@ -48,6 +48,9 @@ import {
   completeVaultOnboarding,
   ensureUserVault,
   registerAttachmentsAsVaultItems,
+  resolveGlobalUserId,
+  upsertIdentityLinks,
+  upsertVaultProfile,
   type UserVaultSession,
 } from '../vault';
 
@@ -304,18 +307,25 @@ async function persistVaultOnboardingAnswer(
   context: AgentContext,
   vaultSession?: UserVaultSession,
 ) {
-  if (!vaultSession || vaultSession.isNewVault) return;
+  if (!vaultSession) return;
+  if (!context.memoryAccess.write) return;
   if (vaultSession.onboardingStatus !== 'pending') return;
-  if (!context.memoryAccess.write || !context.userId) return;
+  // Avoid polluting the profile with arbitrary small talk.  Only the
+  // first substantial answer to the onboarding question is recorded.
+  if (prompt.trim().length < 12) return;
 
-  await storeUserMemory(context.userId, {
-    content: `First profile note from user: ${prompt}`,
-    category: 'knowledge',
-    importance: 8,
-    tags: ['vault', 'onboarding', 'profile'],
+  await upsertVaultProfile({
     vaultId: vaultSession.vaultId,
-    spaceId: context.spaceId,
-    service: context.serviceId,
+    title: context.userName || 'Person',
+    content: prompt.trim(),
+    source: 'user',
+    createdByUserId: context.userId,
+    tags: ['onboarding'],
+    metadata: {
+      capturedFromService: context.serviceId,
+      capturedFromSpace: context.spaceId,
+      capturedAt: new Date().toISOString(),
+    },
   });
   await completeVaultOnboarding(vaultSession.vaultId);
 }
@@ -418,15 +428,62 @@ export async function processAgent(
   validateContext(context);
   checkRateLimit(context.serviceId);
 
-  const vaultSession = context.userId
-    ? await ensureUserVault(context.userId, {
+  // Resolve a cross-service stable identity for the caller.  The
+  // dashboard linking flow populates `vault_identity_links`; the runtime
+  // uses it to map a (serviceId, userId) pair onto the right vault so a
+  // Telegram user and a Sfera user can share one profile.
+  const resolvedGlobalUserId = context.globalUserId
+    ? context.globalUserId
+    : await resolveGlobalUserId(context.serviceId, context.userId);
+
+  const vaultSession = resolvedGlobalUserId
+    ? await ensureUserVault(resolvedGlobalUserId, {
         displayName: context.userName,
         serviceId: context.serviceId,
         spaceId: context.spaceId,
       })
     : undefined;
+
+  // Persist the current service identity plus any extra links the adapter
+  // sent (e.g. dashboard merging two accounts).  Failures here must never
+  // break the request.
+  const identityLinksToPersist = [
+    ...(context.userId
+      ? [
+          {
+            serviceId: context.serviceId,
+            userId: context.userId,
+            userName: context.userName,
+            primary: true,
+          },
+        ]
+      : []),
+    ...(context.identityLinks ?? []),
+  ].reduce<AgentIdentityLink[]>((links, link) => {
+    if (!link) return links;
+    const existingIndex = links.findIndex(
+      (existing) =>
+        existing.serviceId === link.serviceId &&
+        existing.userId === link.userId,
+    );
+    if (existingIndex >= 0) {
+      links[existingIndex] = { ...links[existingIndex], ...link };
+    } else {
+      links.push(link);
+    }
+    return links;
+  }, []);
+
+  if (vaultSession && identityLinksToPersist.length > 0) {
+    try {
+      await upsertIdentityLinks(vaultSession.vaultId, identityLinksToPersist);
+    } catch (err) {
+      console.error('[processAgent] upsertIdentityLinks failed', err);
+    }
+  }
+
   const runtimeContext: AgentContext = vaultSession
-    ? { ...context, vaultId: vaultSession.vaultId }
+    ? { ...context, vaultId: vaultSession.vaultId, globalUserId: vaultSession.globalUserId }
     : context;
 
   await registerRuntimeAttachments(runtimeContext);

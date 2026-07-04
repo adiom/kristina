@@ -141,13 +141,18 @@ function stringToUuid(input: string): string {
 
 ## Embedding Generation
 
-Uses local LM Studio endpoint with `text-embedding-nomic-embed-text-v1.5` (768-dim). Configurable via `EMBEDDING_MODEL` env variable.
+Uses local Ollama through its OpenAI-compatible `/v1` endpoint with
+`nomic-embed-text:latest` (768-dim). Configurable via `OLLAMA_URL` and
+`OLLAMA_EMBED_MODEL` env variables.
 
 ```typescript
 async function generateEmbedding(text: string): Promise<number[]> {
-  const lmstudio = getLmStudio();
-  const embeddingModel = lmstudio.embeddingModel(
-    process.env.EMBEDDING_MODEL || 'text-embedding-nomic-embed-text-v1.5'
+  const ollama = createOpenAICompatible({
+    name: 'ollama',
+    baseURL: process.env.OLLAMA_URL || 'http://localhost:11434/v1',
+  });
+  const embeddingModel = ollama.embeddingModel(
+    process.env.OLLAMA_EMBED_MODEL || 'nomic-embed-text:latest',
   );
   const { embedding } = await embed({ model: embeddingModel, value: text });
   return embedding;

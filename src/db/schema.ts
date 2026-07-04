@@ -9,7 +9,7 @@ import {
   index,
   uniqueIndex,
 } from 'drizzle-orm/pg-core';
-import { vector } from 'drizzle-orm/pg-core';
+import { boolean, vector } from 'drizzle-orm/pg-core';
 
 export const memory = pgTable(
   'cf_kristina_memory',
@@ -198,4 +198,34 @@ export const diary = pgTable(
     createdAt: timestamp('created_at').defaultNow().notNull(),
   },
   (t) => [index('diary_created_at_idx').on(t.createdAt)]
+);
+
+/**
+ * Cross-service identity links.  Each row binds a `(serviceId, userId)`
+ * pair to a vault.  This is what lets Kristina recognize "this Telegram
+ * user is the same person as that Sfera user".  The dashboard linking
+ * flow inserts and updates these rows; the runtime reads them on every
+ * call to resolve a `globalUserId`.
+ */
+export const vaultIdentityLinks = pgTable(
+  'cf_kristina_vault_identity_links',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    vaultId: uuid('vault_id')
+      .notNull()
+      .references(() => vaults.id, { onDelete: 'cascade' }),
+    serviceId: text('service_id').notNull(),
+    externalUserId: text('external_user_id').notNull(),
+    displayName: text('display_name'),
+    isPrimary: boolean('is_primary').notNull().default(false),
+    linkedAt: timestamp('linked_at').defaultNow().notNull(),
+    lastSeenAt: timestamp('last_seen_at').defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex('vault_identity_links_service_user_idx').on(
+      t.serviceId,
+      t.externalUserId,
+    ),
+    index('vault_identity_links_vault_id_idx').on(t.vaultId),
+  ]
 );

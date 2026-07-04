@@ -1,7 +1,7 @@
-import { desc, eq } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import { db } from '../db';
-import { vaultEvents, vaultItems, vaults } from '../db/schema';
-import type { AgentAttachment } from '../agent/types';
+import { vaultEvents, vaultIdentityLinks, vaultItems, vaults } from '../db/schema';
+import type { AgentAttachment, AgentIdentityLink } from '../agent/types';
 
 export interface UserVaultSession {
   vaultId: string;
@@ -16,6 +16,121 @@ interface EnsureUserVaultOptions {
   spaceId?: string;
 }
 
+/**
+ * Resolve the global user identifier for a `(serviceId, userId)` pair.
+ *
+ * 1. If the caller already passed a `globalUserId`, trust it.
+ * 2. Otherwise look up the identity link table.
+ * 3. Otherwise fall back to `userId` so legacy single-service callers
+ *    keep working.
+ *
+ * Returns `null` if there is no `userId` to resolve at all.
+ */
+export async function resolveGlobalUserId(
+  serviceId: string | undefined,
+  userId: string | undefined,
+): Promise<string | null> {
+  if (!userId) return null;
+  if (!serviceId) return userId;
+
+  const link = await db.query.vaultIdentityLinks.findFirst({
+    where: and(
+      eq(vaultIdentityLinks.serviceId, serviceId),
+      eq(vaultIdentityLinks.externalUserId, userId),
+    ),
+  });
+  if (link) return link.vaultId;
+  return userId;
+}
+
+/**
+ * Upsert identity links for a vault.  Used by both the runtime (when an
+ * adapter sends `identityLinks` in the context) and by the dashboard
+ * linking endpoint.
+ */
+export async function upsertIdentityLinks(
+  vaultId: string,
+  links: AgentIdentityLink[],
+): Promise<void> {
+  if (!links || links.length === 0) return;
+
+  for (const link of links) {
+    if (!link.serviceId || !link.userId) continue;
+    await db
+      .insert(vaultIdentityLinks)
+      .values({
+        vaultId,
+        serviceId: link.serviceId,
+        externalUserId: link.userId,
+        displayName: link.userName ?? null,
+        isPrimary: Boolean(link.primary),
+        linkedAt: new Date(),
+        lastSeenAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: [vaultIdentityLinks.serviceId, vaultIdentityLinks.externalUserId],
+        set: {
+          vaultId,
+          displayName: link.userName ?? sql`${vaultIdentityLinks.displayName}`,
+          isPrimary: Boolean(link.primary),
+          lastSeenAt: new Date(),
+        },
+      });
+
+    await db.insert(vaultEvents).values({
+      vaultId,
+      type: link.primary ? 'identity_linked_primary' : 'identity_linked',
+      actorType: 'system',
+      details: {
+        serviceId: link.serviceId,
+        externalUserId: link.userId,
+        displayName: link.userName,
+      },
+    });
+  }
+}
+
+/**
+ * Dashboard helper: list every identity link for a vault, ordered with
+ * the primary first.
+ */
+export async function listIdentityLinks(vaultId: string) {
+  return db
+    .select()
+    .from(vaultIdentityLinks)
+    .where(eq(vaultIdentityLinks.vaultId, vaultId))
+    .orderBy(desc(vaultIdentityLinks.isPrimary), desc(vaultIdentityLinks.linkedAt));
+}
+
+/**
+ * Dashboard helper: link a new (serviceId, userId) pair to an existing
+ * vault, optionally transferring the pair from another vault (which is
+ * how the dashboard merges two accounts into one).
+ */
+export async function linkIdentityToVault(input: {
+  vaultId: string;
+  serviceId: string;
+  externalUserId: string;
+  displayName?: string;
+  primary?: boolean;
+}): Promise<void> {
+  await upsertIdentityLinks(input.vaultId, [
+    {
+      serviceId: input.serviceId,
+      userId: input.externalUserId,
+      userName: input.displayName,
+      primary: input.primary,
+    },
+  ]);
+
+  if (input.displayName) {
+    await db
+      .update(vaults)
+      .set({ displayName: input.displayName, updatedAt: new Date() })
+      .where(eq(vaults.id, input.vaultId));
+  }
+}
+
 export async function ensureUserVault(
   globalUserId: string,
   options: EnsureUserVaultOptions = {},
@@ -25,10 +140,11 @@ export async function ensureUserVault(
   });
 
   if (existing) {
+    const nextDisplayName = options.displayName ?? existing.displayName;
     await db
       .update(vaults)
       .set({
-        displayName: options.displayName ?? existing.displayName,
+        displayName: nextDisplayName,
         updatedAt: new Date(),
         lastSeenAt: new Date(),
       })
@@ -93,6 +209,7 @@ export interface CreateVaultItemInput {
   kind: 'memory' | 'user_file' | 'agent_file' | 'note' | 'profile' | 'artifact';
   title: string;
   summary?: string;
+  content?: string;
   mimeType?: string;
   sizeBytes?: number;
   storageKey?: string;
@@ -140,6 +257,74 @@ export async function createVaultItem(input: CreateVaultItemInput) {
   });
 
   return item;
+}
+
+/**
+ * Read or update the single `profile` vault item for a vault.  Kristina
+ * stores a person's profile as one structured record so the dashboard
+ * can render it and the LLM can read it back in one query instead of
+ * scanning the whole `user` memory namespace.
+ */
+export async function getVaultProfile(vaultId: string) {
+  return db.query.vaultItems.findFirst({
+    where: and(eq(vaultItems.vaultId, vaultId), eq(vaultItems.kind, 'profile')),
+  });
+}
+
+export async function upsertVaultProfile(input: {
+  vaultId: string;
+  title: string;
+  content?: string;
+  source: 'user' | 'agent' | 'system';
+  createdByUserId?: string;
+  tags?: string[];
+  metadata?: Record<string, unknown>;
+}) {
+  const existing = await getVaultProfile(input.vaultId);
+  const tags = Array.from(new Set([...(existing?.tags ?? []), ...(input.tags ?? [])]));
+
+  if (existing) {
+    const [updated] = await db
+      .update(vaultItems)
+      .set({
+        title: input.title,
+        summary: input.content ?? existing.summary,
+        tags: tags as any,
+        metadata: { ...(existing.metadata ?? {}), ...(input.metadata ?? {}) },
+        updatedAt: new Date(),
+      })
+      .where(eq(vaultItems.id, existing.id))
+      .returning();
+    await db.insert(vaultEvents).values({
+      vaultId: input.vaultId,
+      itemId: existing.id,
+      type: 'profile_updated',
+      actorType: input.source,
+      actorId: input.createdByUserId,
+      details: { title: input.title },
+    });
+    return updated;
+  }
+
+  const created = await createVaultItem({
+    vaultId: input.vaultId,
+    kind: 'profile',
+    title: input.title,
+    summary: input.content,
+    source: input.source,
+    createdByUserId: input.createdByUserId,
+    tags: input.tags,
+    metadata: input.metadata,
+  });
+  await db.insert(vaultEvents).values({
+    vaultId: input.vaultId,
+    itemId: created.id,
+    type: 'profile_created',
+    actorType: input.source,
+    actorId: input.createdByUserId,
+    details: { title: input.title },
+  });
+  return created;
 }
 
 export async function listVaultItems(vaultId: string) {

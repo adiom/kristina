@@ -58,6 +58,11 @@ jest.mock('../../vault', () => ({
     isNewVault: false,
     onboardingStatus: 'completed',
   })),
+  resolveGlobalUserId: jest.fn(
+    async (_serviceId: string | undefined, userId: string | undefined) => userId ?? null,
+  ),
+  upsertIdentityLinks: jest.fn(async () => {}),
+  upsertVaultProfile: jest.fn(async () => ({ id: 'profile-1' })),
   completeVaultOnboarding: jest.fn(async () => {}),
   registerAttachmentsAsVaultItems: jest.fn(async () => []),
 }));
@@ -127,7 +132,25 @@ describe('processAgent', () => {
     expect(result.metadata?.vaultId).toBe('vault-1');
   });
 
-  it('stores first onboarding answer for pending existing vaults', async () => {
+  it('persists the current service user as the primary identity link', async () => {
+    await processAgent('привет', {
+      ...baseContext,
+      serviceId: 'telegram',
+      userId: 'tg-user-42',
+      userName: 'Alice TG',
+    });
+
+    expect(vault.upsertIdentityLinks).toHaveBeenCalledWith('vault-1', [
+      {
+        serviceId: 'telegram',
+        userId: 'tg-user-42',
+        userName: 'Alice TG',
+        primary: true,
+      },
+    ]);
+  });
+
+  it('writes the first onboarding answer into vault profile (not memory)', async () => {
     jest.mocked(vault.ensureUserVault).mockResolvedValueOnce({
       vaultId: 'vault-pending',
       globalUserId: 'global-user-2',
@@ -138,17 +161,78 @@ describe('processAgent', () => {
     await processAgent('я занимаюсь исследованием рынков', {
       ...baseContext,
       userId: 'global-user-2',
+      userName: 'Anya',
       memoryAccess: { ...baseContext.memoryAccess, user: true, write: true },
     });
 
-    expect(store.storeUserMemory).toHaveBeenCalledWith(
-      'global-user-2',
+    expect(vault.upsertVaultProfile).toHaveBeenCalledWith(
       expect.objectContaining({
-        content: 'First profile note from user: я занимаюсь исследованием рынков',
-        tags: ['vault', 'onboarding', 'profile'],
+        vaultId: 'vault-pending',
+        title: 'Anya',
+        content: 'я занимаюсь исследованием рынков',
+        source: 'user',
+        tags: ['onboarding'],
       }),
     );
+    expect(store.storeUserMemory).not.toHaveBeenCalledWith(
+      'global-user-2',
+      expect.objectContaining({ content: expect.stringContaining('First profile note') }),
+    );
     expect(vault.completeVaultOnboarding).toHaveBeenCalledWith('vault-pending');
+  });
+
+  it('skips tiny onboarding answers and does not pollute the profile', async () => {
+    jest.mocked(vault.ensureUserVault).mockResolvedValueOnce({
+      vaultId: 'vault-pending',
+      globalUserId: 'global-user-2b',
+      isNewVault: false,
+      onboardingStatus: 'pending',
+    });
+
+    await processAgent('привет', {
+      ...baseContext,
+      userId: 'global-user-2b',
+      memoryAccess: { ...baseContext.memoryAccess, user: true, write: true },
+    });
+
+    expect(vault.upsertVaultProfile).not.toHaveBeenCalled();
+    expect(vault.completeVaultOnboarding).not.toHaveBeenCalled();
+  });
+
+  it('resolves a cross-service globalUserId via identity links', async () => {
+    jest.mocked(vault.resolveGlobalUserId).mockResolvedValueOnce('global-person-9');
+
+    const result = await processAgent('привет', {
+      ...baseContext,
+      serviceId: 'telegram',
+      userId: 'tg-user-42',
+    });
+
+    expect(vault.resolveGlobalUserId).toHaveBeenCalledWith('telegram', 'tg-user-42');
+    expect(vault.ensureUserVault).toHaveBeenCalledWith(
+      'global-person-9',
+      expect.objectContaining({ serviceId: 'telegram' }),
+    );
+    expect(result.metadata?.vaultId).toBe('vault-1');
+  });
+
+  it('persists identityLinks sent by the adapter', async () => {
+    await processAgent('привет', {
+      ...baseContext,
+      userId: 'tg-user-42',
+      identityLinks: [
+        { serviceId: 'telegram', userId: 'tg-user-42', primary: true },
+        { serviceId: 'sfera', userId: 'sfera-user-7' },
+      ],
+    });
+
+    expect(vault.upsertIdentityLinks).toHaveBeenCalledWith(
+      'vault-1',
+      expect.arrayContaining([
+        expect.objectContaining({ serviceId: 'telegram', userId: 'tg-user-42', primary: true }),
+        expect.objectContaining({ serviceId: 'sfera', userId: 'sfera-user-7' }),
+      ]),
+    );
   });
 
   it('registers attachments in vault and exposes them in metadata', async () => {
