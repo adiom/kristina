@@ -46,7 +46,6 @@
 - [x] Write policy tests
 
 ## Priority: Medium
-
 ### Vault — user storage 🚀
 - [ ] Define `vault` model separately from semantic memory
 - [ ] Introduce canonical `globalUserId` across all client apps
