@@ -283,7 +283,7 @@ describe('processAgent', () => {
       userId: 'global-user-4',
     });
 
-    expect(result.text).toContain('чем ты занимаешься');
-    expect(result.text).toContain('что для тебя сейчас важно?');
+    expect(result.text).toContain('чем ты сейчас занимаешься');
+    expect(result.text).toContain('что для тебя правда важно?');
   });
 });

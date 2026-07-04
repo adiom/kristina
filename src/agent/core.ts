@@ -294,7 +294,8 @@ function buildSystemPrompt(
       '',
       '## First Contact Vault Onboarding',
       'This is a new personal vault for this user.',
-      'Ask exactly one short question to learn what should be remembered about this person.',
+      'If the moment allows, ask one light, natural question that helps you remember the person.',
+      'Do not turn the answer into a form or onboarding script.',
       'Do not ask for secrets, passwords, API keys, private keys, or sensitive credentials.',
     );
   }
@@ -342,7 +343,7 @@ async function registerRuntimeAttachments(context: AgentContext): Promise<void> 
   );
 }
 
-const ONBOARDING_QUESTION = 'Чтобы мне лучше запомнить тебя в личном vault, расскажи в одном-двух предложениях: чем ты занимаешься и что для тебя сейчас важно?';
+const ONBOARDING_QUESTION = 'Чтобы я лучше тебя запомнила, скажи коротко: чем ты сейчас занимаешься и что для тебя правда важно?';
 
 function appendOnboardingQuestionIfNeeded(
   text: string,
@@ -520,7 +521,7 @@ export async function processAgent(
     ? `
 
 ## ОБЯЗАТЕЛЬНО ДЛЯ НОВОГО VAULT
-В конце ответа задай ровно один короткий вопрос о человеке: ${ONBOARDING_QUESTION}`
+Если это уместно по тону разговора, в конце задай один короткий живой вопрос о человеке: ${ONBOARDING_QUESTION}`
     : '';
 
   const fullPrompt = `${prompt}
