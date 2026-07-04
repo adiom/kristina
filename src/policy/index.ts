@@ -1,5 +1,5 @@
 /**
- * Policy layer for the cf-kristina agent runtime.
+ * Policy layer for the Kristina agent runtime.
  *
  * Responsibilities:
  *  - Validate that an {@link AgentContext} carries the minimum required

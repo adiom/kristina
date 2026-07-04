@@ -5,7 +5,7 @@ import { createAgent } from '../agent/core';
 
 function createMcpServer(userId?: string) {
   const server = new McpServer({
-    name: 'cf-kristina',
+    name: 'kristina',
     version: '0.1.0',
   });
 

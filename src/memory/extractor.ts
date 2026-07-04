@@ -1,5 +1,5 @@
 /**
- * Memory extraction module for cf-kristina.
+ * Memory extraction module for Kristina.
  *
  * This module handles two types of memory extraction:
  * 1. Auto-memory: Automatically extracts significant facts after each response

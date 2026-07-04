@@ -1,15 +1,15 @@
 # Adding Kristina to Your Service
 
-cf‑kristina is an **external autonomous agent runtime** that you can attach
+Kristina is an **external autonomous agent runtime** that you can attach
 to any service – a chat, a dashboard, a news site, a simulation, etc.
 All of Kristina's intelligence (personality, memory, reflection, interests,
-logging, policy) lives in **cf‑kristina**. Your service only needs a tiny
+logging, policy) lives in **Kristina**. Your service only needs a tiny
 *adapter* that detects mentions, builds an event context, and renders the
 result.
 
 ```
 ┌──────────────────┐   HTTP / MCP / WS   ┌────────────────────┐
-│   Your service   │ ───────────────────▶│    cf‑kristina     │
+│   Your service   │ ───────────────────▶│     kristina       │
 │   (Sfera, news   │ ◀───────────────────│  (agent runtime)   │
 │   site, bot)     │   AgentResult JSON  └────────────────────┘
 └──────────────────┘

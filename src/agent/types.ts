@@ -1,5 +1,5 @@
 /**
- * Core data models for the cf-kristina agent runtime.
+ * Core data models for the Kristina agent runtime.
  *
  * These types define the contract between any external service (Sfera, a
  * news-site, a chat bot, a simulation) and the agent itself.  The agent

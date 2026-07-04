@@ -33,7 +33,7 @@ export default function Dashboard() {
     <main className="bg-surface min-h-screen p-6 text-primary font-sans">
       {/* Header + ThoughtStream */}
       <header className="flex items-center justify-between mb-6">
-        <h1 className="font-display text-4xl">cf‑kristina Dashboard</h1>
+        <h1 className="font-display text-4xl">Kristina Dashboard</h1>
         <ThoughtStream topic={data.topInterests[0]?.topic ?? "—"} />
       </header>
 

@@ -1,5 +1,5 @@
 /**
- * HTTP transport for the cf-kristina agent runtime.
+ * HTTP transport for the Kristina agent runtime.
  *
  * External services (Sfera, news sites, chat bots) that do not use the
  * MCP protocol can call this endpoint to talk to Kristina.  The

@@ -1,5 +1,5 @@
 /**
- * Agent core for cf-kristina.
+ * Agent core for Kristina.
  *
  * This module owns **all** of the agent's intelligence:
  *   – personality (system prompt)

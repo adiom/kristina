@@ -1,5 +1,5 @@
 /**
- * MCP transport for the cf-kristina agent runtime.
+ * MCP transport for the Kristina agent runtime.
  *
  * Exposes the agent over JSON‑RPC 2.0 (Model Context Protocol).  The
  * available tools are:
@@ -39,7 +39,7 @@ export async function POST(request: NextRequest) {
           protocolVersion: PROTOCOL_VERSION,
           capabilities: { tools: { listChanged: false } },
           serverInfo: {
-            name: 'cf-kristina',
+            name: 'kristina',
             version: PROTOCOL_VERSION,
           },
         },

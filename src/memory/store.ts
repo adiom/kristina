@@ -1,5 +1,5 @@
 /**
- * Persistent memory store for the cf-kristina agent.
+ * Persistent memory store for the Kristina agent.
  *
  * The store is organised into four logical namespaces:
  *

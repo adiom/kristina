@@ -1,4 +1,4 @@
-# cf-kristina
+# kristina
 
 Autonomous AI agent with persistent memory, self-reflection, and personality.
 
@@ -44,7 +44,7 @@ pnpm dev
 ## Project Structure
 
 ```
-cf-kristina/
+kristina/
 ├── src/
 │   ├── agent/           # Agent core: processAgent, types, version, personality
 │   ├── memory/          # Memory system (4-namespace, pgvector, secret-scan)
