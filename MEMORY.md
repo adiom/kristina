@@ -49,7 +49,7 @@ An autonomous AI agent that:
 
 ### API Routes
 - `/api/agent` — HTTP POST (main transport)
-- `/api/mcp` — MCP JSON-RPC POST
+- `/api/mcp` — MCP Streamable HTTP
 - `/api/dashboard` — Dashboard data GET
 - `/dashboard` — Dashboard UI
 - `/chat` — Test chat UI
@@ -92,7 +92,7 @@ An autonomous AI agent that:
 
 ### Transports
 - HTTP POST `/api/agent`
-- MCP JSON-RPC POST `/api/mcp` (tools: agent_message, agent_search, agent_info)
+- MCP Streamable HTTP `/api/mcp` (tools: agent_message, agent_search, agent_info)
 
 ## Planned Features
 - ATMv0 Client for economic simulations

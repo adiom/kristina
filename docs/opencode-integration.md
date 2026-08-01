@@ -24,7 +24,7 @@ Kristina to a new service.
 | Transport | Endpoint | Best for |
 |-----------|----------|----------|
 | HTTP | `POST /api/agent` | Simple backends, dashboards, mobile apps |
-| MCP (JSON‑RPC 2.0) | `POST /api/mcp` | AI‑host environments, Claude / OpenCode style clients |
+| MCP Streamable HTTP | `POST /api/mcp` | AI-host environments, Claude / OpenCode style clients |
 | WebSocket | (planned) | Long‑running simulations |
 
 Both paths take the same `AgentContext` and return the same `AgentResult`
@@ -179,8 +179,9 @@ Available tools:
 * **`agent_search(query, context)`** – read‑only memory search.
 * **`agent_info()`** – version + capabilities.
 
-The MCP `initialize` response includes `protocolVersion: "1.0.0"` and
-`serverInfo.version: "1.0.0"`.
+The MCP `initialize` response negotiates a date-based MCP `protocolVersion`
+through the SDK. `serverInfo.version` remains the Kristina agent contract
+version (`1.0.0`); these versions are intentionally separate.
 
 ## 6. Step‑by‑step: adding Kristina to a new service
 

@@ -194,11 +194,11 @@ interface AgentContext {
 
 ### MCP Request (POST /api/mcp)
 ```
-1. MCP handler receives JSON-RPC request
+1. MCP Streamable HTTP transport receives a request
 2. Routes to agent_message, agent_search, or agent_info
 3. For agent_message: builds AgentContext, calls processAgent
 4. For agent_search: reads memory directly
-5. Returns JSON-RPC response
+5. SDK returns the MCP response over Streamable HTTP
 ```
 
 ### Economic Simulation (ATMv0) [Planned]

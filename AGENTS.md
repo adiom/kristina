@@ -122,11 +122,10 @@ src/app/dashboard/  operator UI
 
 - `POST /api/mcp`
 - Tools: `agent_message`, `agent_search`, `agent_info`.
-- Текущая реализация в `src/app/api/mcp/route.ts` — ручной JSON-RPC adapter.
-  Она ещё не является полноценным MCP Streamable HTTP transport.
-- Не путайте версию контракта агента `1.0.0` с версией MCP protocol. Для
-  совместимости с VS Code/Claude/OpenCode MCP должен отдельно согласовывать
-  поддерживаемую date-based protocol version и корректно реализовывать transport.
+- Реализация использует официальный `WebStandardStreamableHTTPServerTransport`
+  SDK в stateless-режиме, подходящем для Vercel serverless functions.
+- Не путайте версию контракта агента `1.0.0` с версией MCP protocol: MCP
+  protocol version согласовывается SDK отдельно.
 
 ### Standalone MCP
 
@@ -323,8 +322,8 @@ pnpm db:studio        # Drizzle Studio
 
 ## 14. Ближайшие архитектурные риски
 
-- Web `/api/mcp` требует перехода с ручного JSON-RPC на стандартный MCP
-  Streamable HTTP transport и раздельного версионирования MCP/agent contract.
+- Web `/api/mcp` использует stateless MCP Streamable HTTP; при дальнейшем
+  развитии нужно сохранять раздельное версионирование MCP и agent contract.
 - Несколько подробных Markdown-файлов содержат исторические примеры, способные
   расходиться с актуальной схемой и кодом.
 - Planned-функции (ATMv0, WebSocket updates, scheduled reflection) нельзя

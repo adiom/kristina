@@ -10,7 +10,7 @@ Autonomous AI agent with persistent memory, self-reflection, and personality.
 - **Interest System** — Autonomous exploration driven by evolving interests
 - **Dynamic Personality** — Traits that evolve over time (DB-backed)
 - **Transparency** — All actions logged and visible on dashboard
-- **Dual Transport** — HTTP API + MCP JSON-RPC
+- **Dual Transport** — HTTP API + MCP Streamable HTTP
 
 ## Tech Stack
 
@@ -58,7 +58,7 @@ kristina/
 │   ├── db/              # Database schema + migrations
 │   └── app/             # Next.js App Router
 │       ├── api/agent/   # HTTP POST /api/agent
-│       ├── api/mcp/     # MCP JSON-RPC POST /api/mcp
+│       ├── api/mcp/     # MCP Streamable HTTP /api/mcp
 │       ├── api/dashboard/ # Dashboard data GET
 │       ├── dashboard/   # Dashboard UI
 │       └── chat/        # Test chat UI
@@ -71,7 +71,7 @@ kristina/
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/api/agent` | HTTP transport — calls processAgent |
-| POST | `/api/mcp` | MCP JSON-RPC 2.0 — tools: agent_message, agent_search, agent_info |
+| POST | `/api/mcp` | MCP Streamable HTTP — tools: agent_message, agent_search, agent_info |
 | GET | `/api/dashboard` | Dashboard data (supports `?extended=1`) |
 
 ## Documentation
