@@ -1,0 +1,9 @@
+{
+	"servers": {
+		"cf-kristina": {
+			"url": "https://kristina-black.vercel.app/api/mcp",
+			"type": "http"
+		}
+	},
+	"inputs": []
+}

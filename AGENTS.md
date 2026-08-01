@@ -1,114 +1,331 @@
-# AGENTS.md — cf-kristina Agent Project
+# AGENTS.md — паспорт проекта cf-kristina
 
-## Project Overview
-**cf-kristina** — автономный AI-агент‑runtime с постоянной памятью, саморефлексией, личностью и интересами. Подключается к внешним сервисам (Sfera, чат‑боты, news‑сайты, симуляции) через два транспорта:
-- **HTTP** `POST /api/agent`
-- **MCP (JSON‑RPC 2.0)** `POST /api/mcp` с tool‑ами `agent_message`, `agent_search`, `agent_info`
+Этот файл — единая инструкция для любых LLM-агентов, работающих с репозиторием:
+Codex, Claude Code, OpenCode и других. Не создавайте отдельные инструкции под
+конкретный инструмент. Если архитектура или обязательные правила меняются,
+обновляйте этот файл вместе с кодом.
 
-Вся агентная логика (личность, память, рефлексия, интересы, рассуждения, логирование, политика доступа) живёт **внутри** cf‑kristina. Внешние сервисы — лишь тонкие adapter‑ы: обнаруживают упоминание, формируют `AgentContext`, вызывают endpoint, рендерят `AgentResult`. Контракт описан в `docs/opencode-integration.md`.
+## 1. Назначение проекта
 
-Единая точка входа для транспортов — `processAgent(prompt, context)` в `src/agent/core.ts`. Версия протокола — `1.0.0` (см. `src/agent/version.ts`).
+**cf-kristina** — автономный AI-agent runtime с постоянной памятью,
+саморефлексией, интересами, динамической личностью и журналом действий.
 
-### Key Characteristics
-- **Persistent memory** — помнит все разговоры и инсайты
-- **Four-namespace memory** — общая память агента (`own`, `userId=NULL`) + память о людях (`user`, `userId=<id>`) + память пространства (`space`, `spaceId=<id>`) + память сервиса (`service`)
-- **Context isolation** — каждый вызов изолирован через `memoryAccess`‑флаги; нет утечек данных между пользователями/пространствами/сервисами
-- **Policy layer** — валидация контекста, проверка доступа к namespace, запрет записи, per‑service rate limiting (token bucket)
-- **Self-reflection** — фоновый процесс рефлексии, извлекающий инсайты из памяти
-- **Interest-driven exploration** — интересы формируются из памяти, эволюционируют через decay/growth
-- **Dynamic personality** — черты личности хранятся в БД с историей изменений
-- **Transparency** — все действия агента логируются в `activity_log` и видны на дашборде
+Внешние продукты не должны дублировать интеллект агента. Они выступают тонкими
+адаптерами: обнаруживают событие, собирают `AgentContext`, вызывают Kristina и
+отображают `AgentResult`. Личность, память, policy, reasoning, reflection,
+interests и transparency принадлежат этому репозиторию.
 
-## Tech Stack
-- **Runtime**: Next.js 16 (App Router), React 19
-- **Database**: PostgreSQL + pgvector (768‑dim embeddings)
-- **ORM**: Drizzle (`drizzle-orm` + `drizzle-kit`, `pg` driver)
-- **LLM**: локальный OpenAI‑compatible endpoint через LM Studio (`@ai-sdk/openai-compatible` + Vercel AI SDK `ai`). Модель по умолчанию — `qwen/qwen3-1.7b`
-- **Embeddings**: локальная модель через Ollama OpenAI-compatible endpoint, `nomic-embed-text:latest` (768‑dim)
-- **MCP Server**: `@modelcontextprotocol/sdk` (JSON‑RPC 2.0) — web transport via `src/app/api/mcp/route.ts`, standalone stdio via `src/mcp/server.ts`
-- **Validation**: `zod`
-- **UI**: React + Tailwind CSS v4
-- **Testing**: Jest + ts-jest
-- **Deployment**: Vercel (MVP)
-- **Local dev**: `localhost:31337`
+Главная точка входа runtime:
 
-## Project Structure
-```
-cf-kristina/
-├── src/
-│   ├── agent/           # Ядро агента: processAgent, types, version, personality
-│   │   └── __tests__/   # Тесты processAgent
-│   ├── memory/          # Система памяти (4 namespace, pgvector, secret‑scan)
-│   ├── reflection/      # Саморефлексия
-│   ├── interests/       # Система интересов
-│   ├── personality/     # Личность
-│   ├── policy/          # Политика доступа: валидация, access‑флаги, rate limit
-│   │   └── __tests__/   # Тесты policy
-│   ├── mcp/             # MCP server helper
-│   ├── transparency/    # Прозрачность (activity_log)
-│   ├── dashboard/       # Агрегация данных для дашборда
-│   ├── db/              # Схема БД + миграции Drizzle
-│   └── app/             # Next.js App Router
-│       ├── api/agent/   # HTTP‑транспорт  POST /api/agent
-│       ├── api/mcp/     # MCP‑транспорт   POST /api/mcp
-│       ├── api/dashboard/ # Данные дашборда
-│       ├── dashboard/   # UI дашборда
-│       └── chat/        # Тестовый чат‑UI
-└── docs/                # Документация систем + opencode-integration.md
+```ts
+processAgent(prompt, context)
 ```
 
-## Common Commands
-```bash
-# Dev
-pnpm dev              # Start Next.js dev server on http://localhost:31337
-pnpm build            # Build for production
-pnpm start            # Start production server
-pnpm lint             # Run ESLint
+Файл: `src/agent/core.ts`.
 
-# Database
-pnpm db:generate      # Generate Drizzle migrations
-pnpm db:migrate       # Apply migrations
-pnpm db:push          # Push schema directly (dev)
-pnpm db:studio        # Open Drizzle Studio
+## 2. Источники истины
 
-# Testing
-pnpm test             # Run Jest tests
-pnpm test:watch       # Watch mode
+При расхождении документации и реализации доверяйте источникам в таком порядке:
+
+1. Типы и runtime-код в `src/`.
+2. Схема БД и миграции в `src/db/`.
+3. Тесты.
+4. `package.json` и `.env.example`.
+5. Этот паспорт.
+6. Остальные Markdown-файлы.
+
+Подробная документация полезна как контекст, но часть примеров может отставать
+от кода. Не копируйте из неё API, SQL или константы без проверки реализации.
+
+Карта документации:
+
+- `README.md` — краткий вход в проект.
+- `ARCHITECTURE.md` — архитектурный обзор и потоки данных.
+- `docs/opencode-integration.md` — контракт внешних адаптеров.
+- `docs/*-SYSTEM.md` — устройство отдельных подсистем.
+- `PROGRESS.md`, `TODO.md` — исторический статус и планы, не спецификация.
+- `MEMORY.md` — исторический контекст проекта, не память LLM-сессии.
+
+## 3. Текущий стек
+
+- Next.js 16, App Router, React 19, TypeScript.
+- PostgreSQL + pgvector, Drizzle ORM, `pg` driver.
+- Vercel AI SDK (`ai`).
+- LLM: LM Studio через `@ai-sdk/openai-compatible` по умолчанию; Groq
+  поддерживается через `LLM_PROVIDER=groq`.
+- Embeddings: Ollama OpenAI-compatible endpoint,
+  `nomic-embed-text:latest`, размерность 768.
+- MCP SDK присутствует для standalone stdio server.
+- Zod для схем инструментов и валидации структурированного LLM-вывода.
+- Jest + ts-jest для тестов.
+- Tailwind CSS v4 для UI.
+- Деплой MVP: Vercel; production-домен сейчас
+  `https://kristina-black.vercel.app`.
+
+Не добавляйте внешний cloud LLM как обязательную зависимость: локальный режим
+должен оставаться базовым сценарием.
+
+## 4. Архитектура и границы
+
+```text
+External service / UI
+        |
+        | HTTP or MCP
+        v
+Transport adapter (src/app/api/*)
+        |
+        v
+processAgent (src/agent/core.ts)
+        |
+        +-- policy / context validation / rate limit
+        +-- personality and prompt construction
+        +-- memory retrieval and persistence
+        +-- vault and cross-service identity
+        +-- LLM generation
+        +-- activity logging
+        |
+        v
+PostgreSQL + pgvector
 ```
 
-## Environment Variables
+Основные каталоги:
+
+```text
+src/agent/          core runtime, types, version, fixed personality
+src/memory/         four-namespace memory, embeddings, extraction, secret scan
+src/vault/          user vaults, files, profiles, identity links
+src/policy/         context validation, access control, rate limiting
+src/reflection/     reflection cycle and diary
+src/interests/      interest lifecycle
+src/personality/    DB-backed dynamic traits
+src/transparency/   buffered activity log
+src/dashboard/      dashboard aggregation
+src/db/             Drizzle schema and migrations
+src/mcp/            standalone stdio MCP server
+src/app/api/        HTTP transport adapters
+src/app/dashboard/  operator UI
+```
+
+Транспортный код должен быть тонким. Не переносите business logic из
+`processAgent` в route handlers или внешние интеграции.
+
+## 5. Публичные интерфейсы
+
+### HTTP agent API
+
+- `POST /api/agent`
+- Вход: `{ prompt, context, attachments? }`.
+- Выход: `AgentResult`.
+- Версия контракта агента: `1.0.0` в `src/agent/version.ts`.
+
+### Web MCP endpoint
+
+- `POST /api/mcp`
+- Tools: `agent_message`, `agent_search`, `agent_info`.
+- Текущая реализация в `src/app/api/mcp/route.ts` — ручной JSON-RPC adapter.
+  Она ещё не является полноценным MCP Streamable HTTP transport.
+- Не путайте версию контракта агента `1.0.0` с версией MCP protocol. Для
+  совместимости с VS Code/Claude/OpenCode MCP должен отдельно согласовывать
+  поддерживаемую date-based protocol version и корректно реализовывать transport.
+
+### Standalone MCP
+
+- `src/mcp/server.ts` запускает stdio MCP server через официальный SDK.
+- Настройки: `MCP_SERVER_HOST`, `MCP_SERVER_PORT` могут присутствовать в env,
+  но проверяйте фактическое использование перед изменением.
+
+### Dashboard and vault
+
+- `GET /api/dashboard`, опционально `?extended=1`.
+- `GET /api/vault`.
+- `GET|POST /api/vault/items`.
+- `/dashboard` — UI оператора.
+
+Точные формы данных всегда сверяйте с route handlers и `src/agent/types.ts`.
+
+## 6. Критические инварианты
+
+### Изоляция памяти
+
+Память разделена на четыре namespace:
+
+- `own` — собственная память агента, `userId = NULL`.
+- `user` — память о человеке.
+- `space` — память пространства/разговора.
+- `service` — память внешнего сервиса.
+
+Каждый доступ обязан учитывать `context.memoryAccess`. Запрещено:
+
+- читать namespace при выключенном флаге;
+- смешивать данные пользователей, пространств или сервисов;
+- обходить `canAccessMemory` ради удобства;
+- сохранять память при `memoryAccess.write = false`.
+
+### Identity и vault
+
+- Локальная личность определяется парой `serviceId + userId`.
+- `globalUserId` связывает одного человека между сервисами.
+- `vault_identity_links` хранит cross-service связи.
+- Не объединяйте личности эвристически. Связь должна быть явно передана или
+  найдена в таблице identity links.
+
+### Безопасность данных
+
+- Не коммитьте `.env.local`, ключи, пароли, токены и приватные данные.
+- Любая сохраняемая память проходит secret scan.
+- `AgentResult.text` считается недоверенным при HTML-рендеринге.
+- Публичные вызовы проходят policy validation и per-service rate limit.
+- Ошибки API не должны раскрывать secrets, SQL или содержимое чужой памяти.
+
+### Векторные embeddings
+
+- Текущая размерность pgvector: 768.
+- Модель embeddings по умолчанию: `nomic-embed-text:latest` через Ollama.
+- Смена модели допустима только при сохранении размерности либо с миграцией БД
+  и переиндексацией существующих embeddings.
+
+### Версионирование
+
+- `PROTOCOL_VERSION` сейчас означает версию контракта `AgentContext` /
+  `AgentResult`, а не версию MCP specification.
+- Breaking change публичного контракта требует обновить версию, типы, оба
+  транспорта, документацию интеграции и тесты.
+
+## 7. Ключевое поведение подсистем
+
+- Reflection: выбор темы -> поиск памяти -> LLM reflection -> извлечение строк
+  `ИНСАЙТ:` -> сохранение -> diary -> обновление interests.
+- Interests: рост `+0.5`, cross-pollination `+0.2`, линейный decay по неделям,
+  архивирование слабых неактивных интересов. Проверяйте актуальные константы в
+  `src/interests/index.ts`.
+- Personality: фиксированный core prompt в `src/agent/personality.ts` плюс
+  DB-backed traits с историей в `src/personality/index.ts`.
+- Transparency: buffered writes в `activity_log`; события нельзя терять при
+  ошибке flush.
+- Memory extraction: explicit и automatic memory flows разделены; сохраняйте
+  это различие при изменениях.
+
+## 8. База данных
+
+Ключевые таблицы из `src/db/schema.ts`:
+
+- `cf_kristina_memory`.
+- `cf_kristina_vaults`.
+- `cf_kristina_vault_items`.
+- `cf_kristina_vault_events`.
+- `cf_kristina_vault_identity_links`.
+- `cf_kristina_interests`.
+- `cf_kristina_traits`.
+- `cf_kristina_activity_log`.
+- `cf_kristina_diary`.
+
+При изменении схемы:
+
+1. Измените `src/db/schema.ts`.
+2. Создайте новую Drizzle migration; не переписывайте уже применённую миграцию.
+3. Проверьте все readers/writers и API serialization.
+4. Добавьте тест на новое поведение.
+5. Обновите этот паспорт, если изменился архитектурный контракт.
+
+## 9. Переменные окружения
+
+Основные:
+
 ```env
-# Database (PostgreSQL + pgvector)
 DATABASE_URL=postgresql://...
 
-# LLM (local OpenAI-compatible endpoint, e.g. LM Studio)
+LLM_PROVIDER=lmstudio
 LM_STUDIO_URL=http://localhost:1234/v1
 
-# Embeddings (Ollama OpenAI-compatible endpoint)
+# Только для LLM_PROVIDER=groq
+GROQ_API_KEY=...
+
 OLLAMA_URL=http://localhost:11434/v1
 OLLAMA_EMBED_MODEL=nomic-embed-text:latest
 ```
 
-> Значения по умолчанию: LLM `qwen/qwen3-1.7b` через LM Studio, embeddings
-> `nomic-embed-text:latest` через Ollama. Внешние облачные ключи
-> (Anthropic/OpenAI) в текущем MVP не требуются.
+Дополнительные/planned значения перечислены в `.env.example`. Не считайте
+наличие переменной доказательством реализованной функциональности: найдите её
+использование в `src/`.
 
-## Important Patterns
-1. **Four-namespace memory**: `own` (userId=NULL), `user` (userId=<id>), `space` (spaceId=<id>), `service` (service=<id>)
-2. **Context isolation**: each call uses `AgentContext` with `memoryAccess` flags — no cross-user/space/service data leakage
-3. **Reflection cycle**: select topic → search memory → LLM reasoning → extract insights (`ИНСАЙТ:` regex) → store → update interests
-4. **Interest evolution**: linear decay (`DECAY_RATE * floor(days/7)`), growth (+0.5), cross-pollination (+0.2), archive (below threshold 2 for 30d)
-5. **Transparency**: buffered writes (max 50 events or 5s flush) to `activity_log` table; dashboard via `/api/dashboard`
-6. **Reflection diary**: `cf_kristina_diary` table stores topic, reflection text, and insights count per cycle
+## 10. Рабочий процесс для LLM-агента
 
-## File Naming Conventions
-- Components: `kebab-case.tsx`
-- Utilities: `camelCase.ts`
-- Database schema: `schema.ts`
-- API routes: `route.ts` (Next.js App Router)
+Перед изменением:
 
-## Security Notes
-- Never commit `.env.local`
-- All memory entries scanned for secrets before storage
-- Rate limiting on public endpoints
-- Context isolation prevents cross-user data leakage
+1. Прочитайте этот файл полностью.
+2. Проверьте `git status`; не перезаписывайте чужие незавершённые изменения.
+3. Найдите связанные типы, call sites, tests и миграции.
+4. Отделите фактическое текущее поведение от planned-документации.
+
+Во время изменения:
+
+- Делайте минимальное изменение, сохраняющее архитектурные границы.
+- Используйте строгие TypeScript-типы; не расширяйте `any` без необходимости.
+- Валидируйте данные на transport boundary.
+- Не обращайтесь к БД из UI, если уже существует server/domain слой.
+- Не дублируйте memory access, policy или identity logic в route handlers.
+- Для файлов: components — `kebab-case.tsx`, utilities — `camelCase.ts`,
+  App Router handlers — `route.ts`, DB schema — `schema.ts`.
+- Комментарии добавляйте только там, где причина решения неочевидна из кода.
+
+После изменения:
+
+1. Запустите узкие тесты для изменённой области.
+2. Запустите полный `pnpm test` для изменений core/policy/memory/DB contracts.
+3. Запустите `pnpm lint` и `pnpm build`, если изменение затрагивает runtime,
+   routes, types, dependencies или UI.
+4. Проверьте `git diff --check` и итоговый diff.
+5. Укажите, какие проверки не удалось выполнить и почему.
+
+## 11. Команды
+
+```bash
+pnpm dev              # Next.js dev server: http://localhost:31337
+pnpm build            # production build
+pnpm start            # production server
+pnpm lint             # ESLint
+
+pnpm test             # Jest
+pnpm test:watch       # Jest watch mode
+
+pnpm db:generate      # generate Drizzle migration
+pnpm db:migrate       # apply migrations
+pnpm db:push          # push schema directly (development only)
+pnpm db:studio        # Drizzle Studio
+```
+
+Не запускайте `db:push` против production и не применяйте миграции без явно
+указанного окружения.
+
+## 12. Минимальная проверка по типу изменения
+
+| Изменение | Обязательная проверка |
+|---|---|
+| Agent core / types | unit tests, lint, build, оба transport call site |
+| Memory / policy | isolation tests, write-forbidden path, secret scan |
+| DB schema | migration, affected queries, clean build |
+| MCP | initialize, tools/list, tools/call, error path, реальный MCP client |
+| HTTP route | valid request, invalid context, rate limit, internal error |
+| UI | lint, build, ручная проверка основных состояний |
+| Documentation only | ссылки, команды, соответствие текущему коду |
+
+## 13. Definition of Done
+
+Задача завершена, когда:
+
+- реализовано запрошенное поведение без нарушения isolation и policy;
+- публичные типы и транспорты согласованы;
+- добавлены или обновлены релевантные тесты;
+- миграция присутствует, если менялась схема;
+- документация не выдаёт planned-функции за реализованные;
+- lint/tests/build прошли в объёме, соответствующем риску;
+- в diff нет secrets, случайных generated-файлов и посторонних изменений.
+
+## 14. Ближайшие архитектурные риски
+
+- Web `/api/mcp` требует перехода с ручного JSON-RPC на стандартный MCP
+  Streamable HTTP transport и раздельного версионирования MCP/agent contract.
+- Несколько подробных Markdown-файлов содержат исторические примеры, способные
+  расходиться с актуальной схемой и кодом.
+- Planned-функции (ATMv0, WebSocket updates, scheduled reflection) нельзя
+  считать реализованными без подтверждения в `src/` и тестах.
