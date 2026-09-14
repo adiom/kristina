@@ -16,6 +16,16 @@ export const identityLinkSchema = z.object({
   primary: z.boolean().optional(),
 });
 
+export const userProfileSchema = z.object({
+  completed: z.literal(true),
+  name: z.string().optional(),
+  role: z.string().optional(),
+  interests: z.string().optional(),
+  goals: z.string().optional(),
+  context: z.string().optional(),
+  completedAt: z.string().optional(),
+});
+
 export const publicContextSchema = z.object({
   source: z.enum(['sfera', 'http', 'ws', 'sim']),
   serviceId: z.string().min(1),
@@ -50,6 +60,7 @@ export const publicContextSchema = z.object({
       }),
     )
     .optional(),
+  userProfile: userProfileSchema.optional(),
   trigger: z.enum(['mention', 'command', 'event', 'system']),
   responseMode: z.enum(['public', 'private', 'analysis', 'action', 'draft']),
   memoryAccess: memoryAccessSchema,

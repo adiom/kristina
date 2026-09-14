@@ -42,6 +42,16 @@ export interface ConversationMessage {
   content: string;
 }
 
+export interface AgentUserProfile {
+  completed: true;
+  name?: string;
+  role?: string;
+  interests?: string;
+  goals?: string;
+  context?: string;
+  completedAt?: string;
+}
+
 export interface AgentAttachment {
   type: 'file' | 'image' | 'document' | 'artifact';
   source: 'storage' | 'url' | 'base64' | 'vault_item';
@@ -98,6 +108,8 @@ export interface AgentContext {
   attachments?: AgentAttachment[];
   /** Last few messages for situational awareness. */
   conversationHistory?: ConversationMessage[];
+  /** Structured profile supplied by the calling service after its onboarding. */
+  userProfile?: AgentUserProfile;
   /** Why the agent is being called. */
   trigger: AgentTrigger;
   /** Desired output style. */
@@ -121,10 +133,14 @@ export interface MemoryToStore {
   tags: string[];
 }
 
+export type RetrievedMemorySource = 'own' | 'user' | 'space' | 'service';
+
 export interface AgentSourceRef {
   id: string;
   snippet: string;
   similarity: number;
+  source?: RetrievedMemorySource;
+  sourceType?: string;
 }
 
 export interface AgentAction {

@@ -1,13 +1,18 @@
+import { createHash } from 'crypto';
+
 jest.mock('ai', () => ({
   __esModule: true,
   ToolLoopAgent: class {
     async generate({ prompt }: { prompt: string }) {
+      generatedPrompts.push(prompt);
       return { text: `echo: ${prompt.slice(0, 20)}` };
     }
   },
   embed: jest.fn(async () => ({ embedding: new Array(768).fill(0) })),
   tool: (definition: unknown) => definition,
 }));
+
+const generatedPrompts: string[] = [];
 
 jest.mock('@ai-sdk/openai-compatible', () => {
   const callable = Object.assign((modelId: string) => ({ modelId }), {
@@ -30,7 +35,6 @@ jest.mock('../../memory/store', () => ({
   storeSpaceMemory: jest.fn(async () => {}),
   storeServiceMemory: jest.fn(async () => {}),
   upsertVaultMemory: jest.fn(async () => ({ stored: true, memoryId: 'memory-1' })),
-  listVaultMemories: jest.fn(async () => []),
   forgetVaultMemory: jest.fn(async () => ({ forgotten: 1, memoryIds: ['memory-1'] })),
 }));
 
@@ -50,6 +54,7 @@ jest.mock('../../vault', () => ({
   ),
   upsertIdentityLinks: jest.fn(async () => {}),
   getVaultProfile: jest.fn(async () => undefined),
+  upsertVaultProfile: jest.fn(async () => undefined),
   completeVaultOnboarding: jest.fn(async () => {}),
   registerAttachmentsAsVaultItems: jest.fn(async () => []),
 }));
@@ -57,7 +62,7 @@ jest.mock('../../vault', () => ({
 import * as store from '../../memory/store';
 import * as vault from '../../vault';
 import { processAgent } from '../core';
-import type { AgentContext } from '../types';
+import type { AgentContext, AgentUserProfile } from '../types';
 
 const baseContext: AgentContext = {
   source: 'http',
@@ -77,6 +82,7 @@ const baseContext: AgentContext = {
 describe('processAgent', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    generatedPrompts.length = 0;
   });
 
   it('returns a structured AgentResult', async () => {
@@ -183,6 +189,163 @@ describe('processAgent', () => {
     expect(result.sources?.[0].id).toBe('fact-1');
   });
 
+  it('bootstraps an Orbital profile and retrieves it before generating a response', async () => {
+    const profile: AgentUserProfile = {
+      completed: true,
+      name: 'Мария',
+      role: 'Орбитальный инженер',
+      interests: 'Плазменные двигатели',
+      goals: 'Собрать карту технологий',
+      context: 'Работает в Orbital',
+      completedAt: '2026-09-14T10:00:00.000Z',
+    };
+    const storedProfile = {
+      id: 'profile-1',
+      summary: 'Профиль пользователя из Orbital:\n- Имя: Мария\n- Роль: Орбитальный инженер',
+      metadata: { source: 'orbital' },
+    };
+    jest
+      .mocked(vault.getVaultProfile)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(storedProfile as never);
+
+    const result = await processAgent('расскажи про мою текущую роль', {
+      ...baseContext,
+      userId: 'user-42',
+      userProfile: profile,
+      memoryAccess: { ...baseContext.memoryAccess, user: true, write: true },
+    });
+
+    expect(vault.upsertVaultProfile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        vaultId: 'vault-1',
+        title: 'Orbital onboarding',
+        createdByUserId: 'user-42',
+      }),
+    );
+    expect(generatedPrompts[0]).toContain('Орбитальный инженер');
+    expect(result.sources?.[0]).toEqual(
+      expect.objectContaining({
+        id: 'profile-1',
+        source: 'user',
+        sourceType: 'onboarding',
+      }),
+    );
+    expect(result.metadata?.profileBootstrap).toBe('stored');
+  });
+
+  it('does not rewrite an unchanged Orbital profile', async () => {
+    const profile: AgentUserProfile = {
+      completed: true,
+      name: 'Мария',
+      role: 'Орбитальный инженер',
+    };
+    const profileHash = createHash('sha256')
+      .update(JSON.stringify(profile))
+      .digest('hex');
+    jest.mocked(vault.getVaultProfile).mockResolvedValue({
+      id: 'profile-1',
+      summary: 'Профиль пользователя из Orbital',
+      metadata: { profileHash },
+    } as never);
+
+    const result = await processAgent('расскажи про мою текущую роль', {
+      ...baseContext,
+      userId: 'user-42',
+      userProfile: profile,
+      memoryAccess: { ...baseContext.memoryAccess, user: true, write: true },
+    });
+
+    expect(vault.upsertVaultProfile).not.toHaveBeenCalled();
+    expect(result.metadata?.profileBootstrap).toBe('unchanged');
+  });
+
+  it('updates an Orbital profile when its hash changes', async () => {
+    jest.mocked(vault.getVaultProfile).mockResolvedValue({
+      id: 'profile-1',
+      summary: 'Старый профиль',
+      metadata: { profileHash: 'old-hash' },
+    } as never);
+
+    const result = await processAgent('расскажи про мою текущую роль', {
+      ...baseContext,
+      userId: 'user-42',
+      userProfile: {
+        completed: true,
+        name: 'Мария',
+        role: 'Инженер-исследователь',
+      },
+      memoryAccess: { ...baseContext.memoryAccess, user: true, write: true },
+    });
+
+    expect(vault.upsertVaultProfile).toHaveBeenCalledTimes(1);
+    expect(result.metadata?.profileBootstrap).toBe('updated');
+  });
+
+  it('does not bootstrap a profile without memory write access', async () => {
+    await processAgent('что ты знаешь обо мне?', {
+      ...baseContext,
+      userId: 'user-42',
+      userProfile: { completed: true, name: 'Мария' },
+      memoryAccess: { ...baseContext.memoryAccess, user: true, write: false },
+    });
+
+    expect(vault.upsertVaultProfile).not.toHaveBeenCalled();
+  });
+
+  it('keeps memory lookups isolated between local users', async () => {
+    jest
+      .mocked(vault.resolveUserVault)
+      .mockResolvedValueOnce({
+        vaultId: 'vault-user-a',
+        globalUserId: 'test-svc:user-a',
+        isNewVault: false,
+        onboardingStatus: 'completed',
+      })
+      .mockResolvedValueOnce({
+        vaultId: 'vault-user-b',
+        globalUserId: 'test-svc:user-b',
+        isNewVault: false,
+        onboardingStatus: 'completed',
+      });
+
+    await processAgent('что ты знаешь обо мне?', {
+      ...baseContext,
+      userId: 'user-a',
+      memoryAccess: { ...baseContext.memoryAccess, user: true },
+    });
+    await processAgent('что ты знаешь обо мне?', {
+      ...baseContext,
+      userId: 'user-b',
+      memoryAccess: { ...baseContext.memoryAccess, user: true },
+    });
+
+    expect(store.searchVaultMemory).toHaveBeenNthCalledWith(
+      1,
+      'vault-user-a',
+      'что ты знаешь обо мне?',
+      expect.anything(),
+    );
+    expect(store.searchVaultMemory).toHaveBeenNthCalledWith(
+      2,
+      'vault-user-a',
+      'что ты знаешь обо мне?',
+      expect.anything(),
+    );
+    expect(store.searchVaultMemory).toHaveBeenNthCalledWith(
+      3,
+      'vault-user-b',
+      'что ты знаешь обо мне?',
+      expect.anything(),
+    );
+    expect(store.searchVaultMemory).toHaveBeenNthCalledWith(
+      4,
+      'vault-user-b',
+      'что ты знаешь обо мне?',
+      expect.anything(),
+    );
+  });
+
   it('does not automatically save an onboarding answer without a durable fact', async () => {
     jest.mocked(vault.resolveUserVault).mockResolvedValueOnce({
       vaultId: 'vault-pending',
@@ -220,19 +383,32 @@ describe('processAgent', () => {
     });
   });
 
-  it('returns active personal memory for a status request', async () => {
-    jest.mocked(store.listVaultMemories).mockResolvedValueOnce([
-      { id: 'memory-1', content: 'Пользователь любит кофе', category: 'knowledge', importance: 8 },
+  it('returns accessible memory directly for a memory status request', async () => {
+    jest.mocked(store.searchOwnMemory).mockResolvedValueOnce([
+      {
+        id: 'memory-1',
+        content: 'Canfly: внутренний проект с фокусом на AI-экономику',
+        category: 'knowledge',
+        importance: 8,
+        similarity: 0.92,
+        sourceType: 'auto',
+      },
     ] as never);
 
-    const result = await processAgent('что ты обо мне помнишь?', {
+    const result = await processAgent('что ты знаешь про Canfly?', {
       ...baseContext,
       userId: 'user-42',
-      memoryAccess: { ...baseContext.memoryAccess, user: true },
     });
 
-    expect(store.listVaultMemories).toHaveBeenCalledWith('vault-1', { limit: 50 });
-    expect(result.text).toContain('Пользователь любит кофе');
+    expect(store.searchOwnMemory).toHaveBeenCalledWith(
+      'что ты знаешь про Canfly?',
+      { limit: 5 },
+    );
+    expect(result.text).toContain('Вот что мне сейчас доступно в памяти');
+    expect(result.text).toContain('[своя] Canfly: внутренний проект');
+    expect(result.sources?.[0]).toEqual(
+      expect.objectContaining({ source: 'own', sourceType: 'auto' }),
+    );
   });
 
   it('registers attachments in the resolved vault', async () => {

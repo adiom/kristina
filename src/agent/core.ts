@@ -1,11 +1,17 @@
+import { createHash } from 'crypto';
+
 import { ToolLoopAgent, tool } from 'ai';
 import { z } from 'zod';
 import { CEO_PERSONALITY } from './personality';
 import { getModel, provider } from './model';
-import type { AgentContext, AgentIdentityLink, AgentResult } from './types';
+import type {
+  AgentContext,
+  AgentIdentityLink,
+  AgentResult,
+  AgentUserProfile,
+} from './types';
 import {
   forgetVaultMemory,
-  listVaultMemories,
   searchOwnMemory,
   searchServiceMemory,
   searchSpaceMemory,
@@ -36,6 +42,7 @@ import {
   registerAttachmentsAsVaultItems,
   resolveUserVault,
   upsertIdentityLinks,
+  upsertVaultProfile,
   type UserVaultSession,
 } from '../vault';
 
@@ -77,6 +84,7 @@ interface RetrievedMemory {
   importance: number;
   similarity: number;
   source: 'own' | 'user' | 'space' | 'service';
+  sourceType: string;
 }
 
 function toRetrieved(
@@ -90,7 +98,60 @@ function toRetrieved(
     importance: result.importance,
     similarity: result.similarity,
     source,
+    sourceType: result.sourceType,
   };
+}
+
+function buildProfileSummary(profile: AgentUserProfile): string {
+  const fields = [
+    ['Имя', profile.name],
+    ['Роль', profile.role],
+    ['Интересы', profile.interests],
+    ['Цели', profile.goals],
+    ['Контекст', profile.context],
+  ].filter(([, value]) => typeof value === 'string' && value.trim().length > 0);
+
+  if (fields.length === 0) return 'Профиль пользователя из Orbital.';
+  return `Профиль пользователя из Orbital:\n${fields
+    .map(([label, value]) => `- ${label}: ${String(value).trim()}`)
+    .join('\n')}`;
+}
+
+async function bootstrapUserProfile(
+  context: AgentContext,
+  vaultSession: UserVaultSession | undefined,
+): Promise<'skipped' | 'stored' | 'updated' | 'unchanged'> {
+  const profile = context.userProfile;
+  if (
+    !profile ||
+    !vaultSession ||
+    !context.memoryAccess.user ||
+    !context.memoryAccess.write
+  ) {
+    return 'skipped';
+  }
+
+  const profileHash = createHash('sha256')
+    .update(JSON.stringify(profile))
+    .digest('hex');
+  const existing = await getVaultProfile(vaultSession.vaultId);
+  if (existing?.metadata?.profileHash === profileHash) return 'unchanged';
+
+  await upsertVaultProfile({
+    vaultId: vaultSession.vaultId,
+    title: 'Orbital onboarding',
+    content: buildProfileSummary(profile),
+    source: 'system',
+    createdByUserId: context.userId,
+    tags: ['orbital', 'onboarding'],
+    metadata: {
+      source: 'orbital',
+      profileHash,
+      completedAt: profile.completedAt,
+    },
+  });
+
+  return existing ? 'updated' : 'stored';
 }
 
 async function retrieveMemory(
@@ -114,6 +175,8 @@ async function retrieveMemory(
         importance: 10,
         similarity: 1,
         source: 'user',
+        sourceType:
+          profile.metadata?.source === 'orbital' ? 'onboarding' : 'profile',
       });
     }
 
@@ -367,6 +430,8 @@ function memoryOperationResult(
       id: memory.id,
       snippet: memory.content,
       similarity: memory.similarity,
+      source: memory.source,
+      sourceType: memory.sourceType,
     })),
     metadata: {
       model: provider === 'groq' ? 'openai/gpt-oss-120b' : 'qwen/qwen3-1.7b',
@@ -441,6 +506,8 @@ export async function processAgent(
     }
   }
 
+  const profileBootstrap = await bootstrapUserProfile(runtimeContext, vaultSession);
+
   await registerRuntimeAttachments(runtimeContext);
   await persistVaultOnboardingAnswer(prompt, runtimeContext, vaultSession);
 
@@ -492,28 +559,28 @@ export async function processAgent(
   const memories = await retrieveMemory(prompt, runtimeContext);
 
   if (isMemoryStatusRequest(prompt)) {
-    const active = canAccessMemory(runtimeContext, 'user') && runtimeContext.vaultId
-      ? await listVaultMemories(runtimeContext.vaultId, { limit: 50 })
-      : [];
-    const text = active.length
-      ? `Вот что я сейчас помню:\n${active
-          .map((memory) => `- ${memory.content}`)
+    const sourceLabels: Record<RetrievedMemory['source'], string> = {
+      own: 'своя',
+      user: 'пользовательская',
+      space: 'пространства',
+      service: 'сервиса',
+    };
+    const text = memories.length
+      ? `Вот что мне сейчас доступно в памяти:\n${memories
+          .slice(0, 12)
+          .map(
+            (memory) =>
+              `- [${sourceLabels[memory.source]}] ${memory.content}`,
+          )
           .join('\n')}`
-      : 'Пока у меня нет активной личной памяти о тебе.';
+      : 'Сейчас у меня нет доступных воспоминаний по этому запросу.';
 
     const result = memoryOperationResult(
       text,
-      active.map((memory) => ({
-        id: memory.id,
-        content: memory.content,
-        category: memory.category,
-        importance: memory.importance,
-        similarity: 1,
-        source: 'user' as const,
-      })),
+      memories,
       runtimeContext,
       vaultSession,
-      { type: 'status', count: active.length },
+      { type: 'status', count: memories.length },
     );
     await logActivity({
       type: 'message_sent',
@@ -558,6 +625,8 @@ ${memorySnippet || '(no relevant memory)'}
       id: memory.id,
       snippet: memory.content,
       similarity: memory.similarity,
+      source: memory.source,
+      sourceType: memory.sourceType,
     })),
     metadata: {
       model: provider === 'groq' ? 'openai/gpt-oss-120b' : 'qwen/qwen3-1.7b',
@@ -567,6 +636,7 @@ ${memorySnippet || '(no relevant memory)'}
       vaultId: vaultSession?.vaultId,
       isNewVault: vaultSession?.isNewVault,
       vaultOnboardingStatus: vaultSession?.onboardingStatus,
+      profileBootstrap,
       attachments: runtimeContext.attachments?.map((attachment) => ({
         type: attachment.type,
         title: attachment.title,

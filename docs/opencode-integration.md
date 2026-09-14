@@ -68,6 +68,20 @@ interface AgentContext {
   spaceName?: string;
   userId?: string;
   userName?: string;
+  /**
+   * Completed service-side onboarding profile. Kristina writes it to the
+   * resolved user vault before memory retrieval; unchanged profiles are not
+   * rewritten.
+   */
+  userProfile?: {
+    completed: true;
+    name?: string;
+    role?: string;
+    interests?: string;
+    goals?: string;
+    context?: string;
+    completedAt?: string;
+  };
   attachments?: AgentAttachment[];
   conversationHistory?: ConversationMessage[];
   trigger: 'mention' | 'command' | 'event' | 'system';
@@ -95,11 +109,14 @@ cross-service links. Kristina never merges identities heuristically.
    `cf_kristina_vault_identity_links`.
 2. New identities receive `globalUserId = serviceId + ":" + userId`.
 3. All user memory is keyed by the resolved `vaultId`.
-4. Retrieval reads the active vault profile, then durable facts/summaries,
+4. A service may supply a completed `userProfile`; Kristina stores it as the
+   vault profile before retrieval and skips the write when its hash is
+   unchanged.
+5. Retrieval reads the active vault profile, then durable facts/summaries,
    then episodes using semantic, full-text, importance, and recency signals.
-5. Similar facts are deduplicated, confirmed, or superseded inside the same
+6. Similar facts are deduplicated, confirmed, or superseded inside the same
    vault.
-6. Deleted or superseded memories remain auditable but are excluded from
+7. Deleted or superseded memories remain auditable but are excluded from
    retrieval.
 
 Users can say:

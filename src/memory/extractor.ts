@@ -85,7 +85,13 @@ export function extractExplicitContent(prompt: string): string {
 }
 
 export function isMemoryStatusRequest(prompt: string): boolean {
-  return /что ты (обо мне )?помнишь/i.test(prompt) || /what do you (remember|know) about me/i.test(prompt);
+  return (
+    /что ты (обо меня |обо мне |про меня )?(знаешь|помнишь)/i.test(prompt) ||
+    /что (есть|хранится) в (твоей )?памяти/i.test(prompt) ||
+    /покажи (мне )?(твою )?память/i.test(prompt) ||
+    /расскажи (мне )?про (твою )?память/i.test(prompt) ||
+    /what do you (remember|know)/i.test(prompt)
+  );
 }
 
 export function isForgetRequest(prompt: string): boolean {
