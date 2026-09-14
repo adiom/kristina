@@ -1,6 +1,6 @@
 import { db } from '../db';
 import { interests } from '../db/schema';
-import { sql, eq, desc, and, lt } from 'drizzle-orm';
+import { sql, eq, desc, and } from 'drizzle-orm';
 
 const DECAY_RATE = 0.1;
 const GROWTH_RATE = 0.5;

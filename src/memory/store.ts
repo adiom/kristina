@@ -1,63 +1,28 @@
-/**
- * Persistent memory store for the Kristina agent.
- *
- * The store is organised into four logical namespaces:
- *
- *   • `own`     – the agent's own knowledge (userId = NULL)
- *   • `user`    – knowledge about a specific user (userId = <id>)
- *   • `space`   – knowledge scoped to a conversation space (spaceId = <id>)
- *   • `service` – knowledge about a particular external service (service = <id>)
- *
- * Read/write operations accept a `spaceId` and/or `service` filter so the
- * policy layer can enforce isolation.  The agent itself decides which
- * namespace a piece of knowledge belongs to; the store only persists it.
- */
-
+import { createHash } from 'crypto';
+import { and, eq, gt, inArray, isNull, or, sql } from 'drizzle-orm';
+import { embed } from 'ai';
+import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { db } from '../db';
 import { memory } from '../db/schema';
-import { eq, and, desc, sql, isNull, isNotNull } from 'drizzle-orm';
-import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
-import { embed } from 'ai';
 
-// Embeddings run locally via Ollama (nomic-embed-text, 768-dim).
-// LM Studio endpoint is reserved for chat completions if/when we go
-// back to a local LLM.
-function getEmbeddingsProvider() {
-  return createOpenAICompatible({
-    name: 'ollama',
-    baseURL: process.env.OLLAMA_URL || 'http://localhost:11434/v1',
-  });
-}
+export type MemoryType = 'fact' | 'episode' | 'summary';
+export type MemoryStatus =
+  | 'active'
+  | 'superseded'
+  | 'expired'
+  | 'deleted'
+  | 'legacy_local_only';
+export type MemorySourceType =
+  | 'explicit'
+  | 'auto'
+  | 'agent'
+  | 'reflection'
+  | 'onboarding';
 
 const EMBEDDING_MODEL =
   process.env.OLLAMA_EMBED_MODEL || 'nomic-embed-text:latest';
 const EMBEDDING_DIM = 768;
-
-interface SearchOptions {
-  userId?: string | null;
-  vaultId?: string | null;
-  spaceId?: string | null;
-  service?: string | null;
-  category?: string;
-  minSimilarity?: number;
-  limit?: number;
-}
-
-interface StoreEntry {
-  content: string;
-  category: 'insight' | 'pattern' | 'knowledge' | 'decision' | 'reflection';
-  importance: number;
-  tags?: string[];
-  vaultId?: string | null;
-  userId?: string | null;
-  spaceId?: string | null;
-  service?: string | null;
-  context?: {
-    channel?: string;
-    emotionalTone?: string;
-    situation?: string;
-  };
-}
+const UUID_NAMESPACE = '6f1c7aed-30d2-4f5b-9f88-3a5b9d2e4a11';
 
 const SECRET_PATTERNS = [
   /sk-[a-zA-Z0-9]{20,}/,
@@ -70,197 +35,298 @@ const SECRET_PATTERNS = [
   /\$[A-Z_]+/,
 ];
 
+export interface SearchOptions {
+  userId?: string | null;
+  vaultId?: string | null;
+  spaceId?: string | null;
+  service?: string | null;
+  category?: string;
+  memoryTypes?: MemoryType[];
+  statuses?: MemoryStatus[];
+  minSimilarity?: number;
+  limit?: number;
+}
+
+export interface StoreEntry {
+  content: string;
+  category?: 'insight' | 'pattern' | 'knowledge' | 'decision' | 'reflection';
+  importance?: number;
+  tags?: string[];
+  vaultId?: string | null;
+  userId?: string | null;
+  spaceId?: string | null;
+  service?: string | null;
+  memoryType?: MemoryType;
+  confidence?: number;
+  sourceType?: MemorySourceType;
+  lastConfirmedAt?: Date;
+  validUntil?: Date | null;
+  context?: {
+    channel?: string;
+    emotionalTone?: string;
+    situation?: string;
+  };
+}
+
+export interface StoreResult {
+  stored: boolean;
+  confirmed?: boolean;
+  superseded?: boolean;
+  memoryId?: string;
+  confidence?: number;
+}
+
+export interface MemorySearchResult {
+  id: string;
+  content: string;
+  category: string;
+  importance: number;
+  tags: string[] | null;
+  userId: string | null;
+  vaultId: string | null;
+  spaceId: string | null;
+  service: string | null;
+  memoryType: MemoryType;
+  status: MemoryStatus;
+  confidence: number;
+  sourceType: MemorySourceType;
+  lastConfirmedAt: Date | null;
+  validUntil: Date | null;
+  localUserId: string | null;
+  context: Record<string, unknown> | null;
+  createdAt: Date;
+  similarity: number;
+  textScore: number;
+  rankScore: number;
+}
+
 function containsSecret(text: string): boolean {
   return SECRET_PATTERNS.some((pattern) => pattern.test(text));
 }
 
-/* ------------------------------------------------------------------ */
-/* String → UUID conversion                                           */
-/*                                                                     */
-/* The `userId` and `spaceId` columns are typed as `uuid` in Postgres, */
-/* but external services (Sfera, news sites, etc.) pass plain strings. */
-/* We derive a deterministic UUIDv5 from each string so the same input */
-/* always maps to the same row.  No external crypto dependency – just  */
-/* a tiny SHA‑1 based implementation.                                  */
-/* ------------------------------------------------------------------ */
-
-import { createHash } from 'crypto';
-
-// Fixed namespace UUID (arbitrary but stable) for our agent.
-const NAMESPACE = '6f1c7aed-30d2-4f5b-9f88-3a5b9d2e4a11';
-
 function stringToUuid(input: string): string {
   const hash = createHash('sha1')
-    .update(NAMESPACE)
+    .update(UUID_NAMESPACE)
     .update(input)
     .digest();
-  // Set version (5) and variant (10xx) bits per RFC 4122.
   const bytes = Buffer.from(hash.subarray(0, 16));
   bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x50;
   bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
   const hex = bytes.toString('hex');
-  return (
-    hex.slice(0, 8) + '-' +
-    hex.slice(8, 12) + '-' +
-    hex.slice(12, 16) + '-' +
-    hex.slice(16, 20) + '-' +
-    hex.slice(20, 32)
-  );
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
+
+function contentHash(content: string): string {
+  return createHash('sha256')
+    .update(content.trim().toLowerCase(), 'utf8')
+    .digest('hex');
+}
+
+function clampConfidence(confidence: number | undefined): number {
+  return Math.max(0, Math.min(100, Math.round(confidence ?? 70)));
+}
+
+function getEmbeddingsProvider() {
+  return createOpenAICompatible({
+    name: 'ollama',
+    baseURL: process.env.OLLAMA_URL || 'http://localhost:11434/v1',
+  });
 }
 
 async function generateEmbedding(text: string): Promise<number[]> {
   try {
     const provider = getEmbeddingsProvider();
     const embeddingModel = provider.embeddingModel(EMBEDDING_MODEL);
-
-    // 5-second timeout: ollama is local and fast, but we still don't
-    // want to block a chat turn forever.
     const embeddingPromise = embed({ model: embeddingModel, value: text });
     const timeoutPromise = new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error('Embedding timeout')), 5000),
     );
-
-    const { embedding } = await Promise.race([
-      embeddingPromise,
-      timeoutPromise,
-    ]);
-    const vec = embedding as number[];
-    if (vec.length !== EMBEDDING_DIM) {
+    const { embedding } = await Promise.race([embeddingPromise, timeoutPromise]);
+    const vector = embedding as number[];
+    if (vector.length !== EMBEDDING_DIM) {
       console.warn(
-        `[memory] embedding dim mismatch: got ${vec.length}, expected ${EMBEDDING_DIM}`,
+        `[memory] embedding dim mismatch: got ${vector.length}, expected ${EMBEDDING_DIM}`,
       );
     }
-    return vec;
+    return vector;
   } catch (err) {
     console.warn(
       '[generateEmbedding] Failed, using deterministic fallback:',
       (err as Error).message,
     );
-    // Deterministic 768-dim fallback so the store still works while
-    // ollama is warming up / offline.  Quality is poor (not semantic),
-    // but writes never crash.
-    const fallback: number[] = new Array(EMBEDDING_DIM);
+    const fallback = new Array<number>(EMBEDDING_DIM);
     let hash = 0;
-    for (let i = 0; i < text.length; i++) {
-      hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
+    for (let index = 0; index < text.length; index += 1) {
+      hash = ((hash << 5) - hash + text.charCodeAt(index)) | 0;
     }
-    for (let i = 0; i < EMBEDDING_DIM; i++) {
-      hash = ((hash << 5) - hash + i) | 0;
-      fallback[i] = Math.sin(hash) * 10000 % 1;
+    for (let index = 0; index < EMBEDDING_DIM; index += 1) {
+      hash = ((hash << 5) - hash + index) | 0;
+      fallback[index] = ((hash >>> 8) % 1000) / 1000;
     }
     return fallback;
   }
 }
 
-/* ------------------------------------------------------------------ */
-/* Write helpers                                                       */
-/* ------------------------------------------------------------------ */
+function queryVector(embedding: number[]): string {
+  if (
+    embedding.length !== EMBEDDING_DIM ||
+    embedding.some((value) => !Number.isFinite(value))
+  ) {
+    throw new Error('Invalid embedding vector');
+  }
+  return `'[${embedding.join(',')}]'::vector`;
+}
+
+async function insertMemory(entry: StoreEntry): Promise<string> {
+  if (containsSecret(entry.content)) {
+    throw new Error('Memory entry rejected: contains potential secret');
+  }
+
+  const embedding = await generateEmbedding(entry.content);
+  const [created] = await db
+    .insert(memory)
+    .values({
+      content: entry.content,
+      category: entry.category ?? 'knowledge',
+      importance: entry.importance ?? 5,
+      tags: entry.tags ?? [],
+      vaultId: entry.vaultId ?? null,
+      userId: entry.userId ? stringToUuid(entry.userId) : null,
+      spaceId: entry.spaceId ? stringToUuid(entry.spaceId) : null,
+      service: entry.service ?? null,
+      memoryType: entry.memoryType ?? 'episode',
+      status: 'active',
+      confidence: clampConfidence(entry.confidence),
+      sourceType: entry.sourceType ?? 'auto',
+      lastConfirmedAt: entry.lastConfirmedAt ?? new Date(),
+      validUntil: entry.validUntil ?? null,
+      contentHash: contentHash(entry.content),
+      embeddingModel: EMBEDDING_MODEL,
+      localUserId: entry.userId ?? null,
+      context: entry.context || {},
+      embedding,
+    })
+    .returning({ id: memory.id });
+
+  if (!created) throw new Error('Failed to store memory');
+  return created.id;
+}
 
 export async function storeOwnMemory(entry: StoreEntry) {
-  if (containsSecret(entry.content)) {
-    throw new Error('Memory entry rejected: contains potential secret');
-  }
-
-  const embedding = await generateEmbedding(entry.content);
-
-  await db.insert(memory).values({
-    content: entry.content,
-    category: entry.category,
-    importance: entry.importance,
-    tags: entry.tags || [],
-    vaultId: entry.vaultId ?? null,
-    userId: null,
-    spaceId: entry.spaceId ? stringToUuid(entry.spaceId) : null,
-    service: entry.service ?? null,
-    context: entry.context || {},
-    embedding,
-  });
+  await insertMemory({ ...entry, vaultId: null, userId: null });
 }
 
-export async function storeUserMemory(
-  userId: string,
+export async function storeUserMemory(userId: string, entry: StoreEntry) {
+  if (!entry.vaultId) {
+    throw new Error('User memory requires vaultId');
+  }
+  await insertMemory({ ...entry, userId });
+}
+
+export async function storeVaultMemory(
+  vaultId: string,
   entry: StoreEntry,
+  localUserId?: string,
 ) {
-  if (containsSecret(entry.content)) {
-    throw new Error('Memory entry rejected: contains potential secret');
-  }
-
-  const embedding = await generateEmbedding(entry.content);
-
-  await db.insert(memory).values({
-    content: entry.content,
-    category: entry.category,
-    importance: entry.importance,
-    tags: entry.tags || [],
-    vaultId: entry.vaultId ?? null,
-    userId: stringToUuid(userId),
-    spaceId: entry.spaceId ? stringToUuid(entry.spaceId) : null,
-    service: entry.service ?? null,
-    context: entry.context || {},
-    embedding,
+  await insertMemory({
+    ...entry,
+    vaultId,
+    userId: localUserId ?? entry.userId ?? null,
   });
 }
 
-export async function storeSpaceMemory(
-  spaceId: string,
+export async function storeSpaceMemory(spaceId: string, entry: StoreEntry) {
+  await insertMemory({ ...entry, spaceId });
+}
+
+export async function storeServiceMemory(serviceId: string, entry: StoreEntry) {
+  await insertMemory({ ...entry, service: serviceId });
+}
+
+async function updateConfirmation(
+  memoryId: string,
+  confidence: number,
+): Promise<number> {
+  const nextConfidence = clampConfidence(confidence);
+  await db
+    .update(memory)
+    .set({ confidence: nextConfidence, lastConfirmedAt: new Date() })
+    .where(eq(memory.id, memoryId));
+  return nextConfidence;
+}
+
+export async function upsertVaultMemory(
+  vaultId: string,
   entry: StoreEntry,
-) {
+  localUserId?: string,
+): Promise<StoreResult> {
   if (containsSecret(entry.content)) {
     throw new Error('Memory entry rejected: contains potential secret');
   }
 
-  const embedding = await generateEmbedding(entry.content);
+  const hash = contentHash(entry.content);
+  const exact = await db
+    .select({ id: memory.id, confidence: memory.confidence })
+    .from(memory)
+    .where(and(eq(memory.vaultId, vaultId), eq(memory.contentHash, hash)))
+    .limit(1);
 
-  await db.insert(memory).values({
-    content: entry.content,
-    category: entry.category,
-    importance: entry.importance,
-    tags: entry.tags || [],
-    vaultId: entry.vaultId ?? null,
-    userId: entry.userId ? stringToUuid(entry.userId) : null,
-    spaceId: stringToUuid(spaceId),
-    service: entry.service ?? null,
-    context: entry.context || {},
-    embedding,
-  });
-}
-
-export async function storeServiceMemory(
-  serviceId: string,
-  entry: StoreEntry,
-) {
-  if (containsSecret(entry.content)) {
-    throw new Error('Memory entry rejected: contains potential secret');
+  if (exact[0]) {
+    const confidence = await updateConfirmation(
+      exact[0].id,
+      Math.max(exact[0].confidence, entry.confidence ?? 70),
+    );
+    return { stored: false, confirmed: true, memoryId: exact[0].id, confidence };
   }
 
-  const embedding = await generateEmbedding(entry.content);
-
-  await db.insert(memory).values({
-    content: entry.content,
-    category: entry.category,
-    importance: entry.importance,
-    tags: entry.tags || [],
-    vaultId: entry.vaultId ?? null,
-    userId: entry.userId ? stringToUuid(entry.userId) : null,
-    spaceId: entry.spaceId ? stringToUuid(entry.spaceId) : null,
-    service: serviceId,
-    context: entry.context || {},
-    embedding,
+  const semantic = await searchVaultMemory(vaultId, entry.content, {
+    minSimilarity: 0.82,
+    limit: 1,
+    statuses: ['active'],
   });
+  const duplicate = semantic[0];
+  const duplicateAction = resolveDuplicateAction(duplicate, entry.confidence ?? 70);
+
+  if (duplicateAction === 'confirm' && duplicate) {
+    const confidence = await updateConfirmation(
+      duplicate.id,
+      Math.max(duplicate.confidence, entry.confidence ?? 70),
+    );
+    return { stored: false, confirmed: true, memoryId: duplicate.id, confidence };
+  }
+
+  const memoryId = await insertMemory({
+    ...entry,
+    vaultId,
+    userId: localUserId ?? entry.userId ?? null,
+  });
+
+  if (duplicateAction === 'supersede' && duplicate) {
+    await db
+      .update(memory)
+      .set({ status: 'superseded', supersededBy: memoryId })
+      .where(eq(memory.id, duplicate.id));
+    return { stored: true, superseded: true, memoryId };
+  }
+
+  return { stored: true, memoryId };
 }
 
-/* ------------------------------------------------------------------ */
-/* Read helpers                                                        */
-/* ------------------------------------------------------------------ */
+export function resolveDuplicateAction(
+  duplicate: { similarity: number; confidence: number } | undefined,
+  nextConfidence: number,
+): 'create' | 'confirm' | 'supersede' {
+  if (!duplicate) return 'create';
+  if (duplicate.similarity >= 0.95) return 'confirm';
+  if (nextConfidence >= duplicate.confidence) return 'supersede';
+  return 'create';
+}
 
 export async function searchOwnMemory(
   query: string,
   options: SearchOptions = {},
 ) {
-  return searchMemory(query, {
-    ...options,
-    userId: null,
-  });
+  return searchMemory(query, { ...options, userId: null });
 }
 
 export async function searchUserMemory(
@@ -268,10 +334,18 @@ export async function searchUserMemory(
   query: string,
   options: SearchOptions = {},
 ) {
-  return searchMemory(query, {
-    ...options,
-    userId,
-  });
+  if (!options.vaultId) {
+    throw new Error('User memory search requires vaultId');
+  }
+  return searchMemory(query, { ...options, userId, vaultId: options.vaultId });
+}
+
+export async function searchVaultMemory(
+  vaultId: string,
+  query: string,
+  options: Omit<SearchOptions, 'vaultId' | 'userId'> = {},
+) {
+  return searchMemory(query, { ...options, vaultId });
 }
 
 export async function searchSpaceMemory(
@@ -279,10 +353,7 @@ export async function searchSpaceMemory(
   query: string,
   options: SearchOptions = {},
 ) {
-  return searchMemory(query, {
-    ...options,
-    spaceId,
-  });
+  return searchMemory(query, { ...options, spaceId });
 }
 
 export async function searchServiceMemory(
@@ -290,56 +361,50 @@ export async function searchServiceMemory(
   query: string,
   options: SearchOptions = {},
 ) {
-  return searchMemory(query, {
-    ...options,
-    service: serviceId,
-  });
+  return searchMemory(query, { ...options, service: serviceId });
 }
 
-async function searchMemory(query: string, options: SearchOptions) {
-  const queryEmbedding = await generateEmbedding(query);
-  const minSimilarity = options.minSimilarity || 0.7;
-  const limit = options.limit || 5;
-
-  const conditions = [];
+async function searchMemory(
+  query: string,
+  options: SearchOptions,
+): Promise<MemorySearchResult[]> {
+  const embedding = await generateEmbedding(query);
+  const vector = sql.raw(queryVector(embedding));
+  const minSimilarity = options.minSimilarity ?? 0.7;
+  const limit = options.limit ?? 5;
+  const statuses = options.statuses ?? ['active'];
+  const conditions = [
+    inArray(memory.status, statuses),
+    or(isNull(memory.validUntil), gt(memory.validUntil, new Date())),
+  ];
 
   if (options.userId !== undefined) {
     if (options.userId === null) {
       conditions.push(isNull(memory.userId));
     } else {
-      // `userId` from external services is an arbitrary string (e.g.
-      // "test-user-1").  The column is `uuid`, so we hash the string
-      // into a deterministic UUIDv5 for the lookup only.
-      const uuid = stringToUuid(options.userId);
-      conditions.push(eq(memory.userId, uuid));
+      conditions.push(eq(memory.userId, stringToUuid(options.userId)));
     }
-  } else {
-    // If no userId specified, exclude user‑scoped rows so the agent
-    // never accidentally sees another user's private memories.
+  } else if (!options.vaultId) {
     conditions.push(isNull(memory.userId));
   }
 
-  if (options.vaultId) {
-    conditions.push(eq(memory.vaultId, options.vaultId));
-  }
-
+  if (options.vaultId) conditions.push(eq(memory.vaultId, options.vaultId));
   if (options.spaceId) {
     conditions.push(eq(memory.spaceId, stringToUuid(options.spaceId)));
   }
-
-  if (options.service) {
-    // `service` is a plain text column – no conversion needed.
-    conditions.push(eq(memory.service, options.service));
-  }
-
+  if (options.service) conditions.push(eq(memory.service, options.service));
   if (options.category) {
-    conditions.push(eq(memory.category, options.category as any));
+    conditions.push(eq(memory.category, options.category as never));
+  }
+  if (options.memoryTypes?.length) {
+    conditions.push(inArray(memory.memoryType, options.memoryTypes));
   }
 
-  const whereCondition =
-    conditions.length === 1 ? conditions[0] : and(...conditions);
+  const textScore = sql<number>`CASE WHEN to_tsvector('simple', ${memory.content}) @@ plainto_tsquery('simple', ${query}) THEN 1 ELSE 0 END`;
+  const similarity = sql<number>`1 - (${memory.embedding} <=> ${vector})`;
+  const rankScore = sql<number>`(${similarity} + (0.25 * ${textScore}) + (${memory.importance}::numeric / 100) + (1.0 / (1 + EXTRACT(EPOCH FROM (now() - ${memory.createdAt})) / 86400)))`;
 
-  const results = await db
+  const rows = await db
     .select({
       id: memory.id,
       content: memory.content,
@@ -347,16 +412,106 @@ async function searchMemory(query: string, options: SearchOptions) {
       importance: memory.importance,
       tags: memory.tags,
       userId: memory.userId,
+      vaultId: memory.vaultId,
       spaceId: memory.spaceId,
       service: memory.service,
+      memoryType: memory.memoryType,
+      status: memory.status,
+      confidence: memory.confidence,
+      sourceType: memory.sourceType,
+      lastConfirmedAt: memory.lastConfirmedAt,
+      validUntil: memory.validUntil,
+      localUserId: memory.localUserId,
       context: memory.context,
       createdAt: memory.createdAt,
-      similarity: sql<number>`1 - (${memory.embedding} <=> ${sql.raw(`'[${queryEmbedding.join(',')}]'::vector`)})`,
+      similarity,
+      textScore,
+      rankScore,
     })
     .from(memory)
-    .where(whereCondition)
-    .orderBy(sql`${memory.embedding} <=> ${sql.raw(`'[${queryEmbedding.join(',')}]'::vector`)}`)
+    .where(and(...conditions))
+    .orderBy(sql`${rankScore} DESC`)
     .limit(limit);
 
-  return results.filter((r) => r.similarity >= minSimilarity);
+  return rows
+    .map((row) => ({
+      ...row,
+      similarity: Number(row.similarity),
+      textScore: Number(row.textScore),
+      rankScore: Number(row.rankScore),
+    }))
+    .filter((row) => row.similarity >= minSimilarity || row.textScore > 0);
+}
+
+export async function listVaultMemories(
+  vaultId: string,
+  options: { statuses?: MemoryStatus[]; limit?: number } = {},
+) {
+  return db
+    .select()
+    .from(memory)
+    .where(
+      and(
+        eq(memory.vaultId, vaultId),
+        inArray(memory.status, options.statuses ?? ['active']),
+      ),
+    )
+    .orderBy(sql`${memory.createdAt} DESC`)
+    .limit(options.limit ?? 100);
+}
+
+export async function confirmVaultMemory(
+  vaultId: string,
+  target: { memoryId?: string; query?: string },
+) {
+  let memoryId = target.memoryId;
+  if (!memoryId && target.query) {
+    const found = await searchVaultMemory(vaultId, target.query, {
+      limit: 1,
+      minSimilarity: 0.6,
+    });
+    memoryId = found[0]?.id;
+  }
+  if (!memoryId) return { confirmed: false };
+
+  const existing = await db
+    .select({ id: memory.id, confidence: memory.confidence })
+    .from(memory)
+    .where(and(eq(memory.id, memoryId), eq(memory.vaultId, vaultId)))
+    .limit(1);
+  if (!existing[0]) return { confirmed: false };
+
+  await updateConfirmation(existing[0].id, existing[0].confidence + 10);
+  return { confirmed: true, memoryId };
+}
+
+export async function forgetVaultMemory(
+  vaultId: string,
+  query: string,
+  options: { exact?: boolean } = {},
+) {
+  if (options.exact) {
+    const hash = contentHash(query);
+    const updated = await db
+      .update(memory)
+      .set({ status: 'deleted' })
+      .where(and(eq(memory.vaultId, vaultId), eq(memory.contentHash, hash)))
+      .returning({ id: memory.id });
+    return {
+      forgotten: updated.length,
+      memoryIds: updated.map((row) => row.id),
+    };
+  }
+
+  const matches = await searchVaultMemory(vaultId, query, {
+    limit: 1,
+    minSimilarity: 0.65,
+  });
+  if (!matches[0]) return { forgotten: 0, memoryIds: [] };
+
+  await db
+    .update(memory)
+    .set({ status: 'deleted' })
+    .where(and(eq(memory.id, matches[0].id), eq(memory.vaultId, vaultId)));
+  return { forgotten: 1, memoryIds: [matches[0].id] };
 }

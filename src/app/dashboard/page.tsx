@@ -7,11 +7,11 @@ type DashboardData = {
   topInterests: Array<{ topic: string; score: number; priority: number }>;
   traits: Array<{ name: string; value: number }>;
   recentReflections: Array<{ topic: string; insightsCount: number; createdAt: string }>;
-  recentActivity: Array<{ type: string; context: any; timestamp: string }>;
+  recentActivity: Array<{ type: string; context: Record<string, unknown> | null; timestamp: string }>;
   extended?: {
     serviceUsage: Array<{ serviceId: string; count: number }>;
     activeSpaces: Array<{ spaceId: string; lastSeen: string }>;
-    recentResults: Array<{ type: string; timestamp: string; context: any }>;
+    recentResults: Array<{ type: string; timestamp: string; context: Record<string, unknown> | null }>;
   };
 };
 

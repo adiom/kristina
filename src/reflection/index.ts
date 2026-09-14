@@ -2,7 +2,7 @@ import { createAgent } from '../agent/core';
 import { searchOwnMemory, storeOwnMemory } from '../memory/store';
 import { db } from '../db';
 import { diary, interests } from '../db/schema';
-import { sql, desc, eq } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
 
 const REFLECTION_PROMPT = `Ты — Кристина, AI-агент с постоянной памятью.
 Твоя задача — провести рефлексию над выбранной темой на основе своих воспоминаний.

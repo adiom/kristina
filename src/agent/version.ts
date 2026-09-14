@@ -7,7 +7,7 @@
  * {@link CAPABILITIES} to negotiate what the agent can do.
  */
 
-export const PROTOCOL_VERSION = '1.0.0';
+export const PROTOCOL_VERSION = '2.0.0';
 
 export const SUPPORTED_SOURCES = ['sfera', 'http', 'ws', 'sim'] as const;
 
@@ -16,6 +16,8 @@ export const CAPABILITIES = {
   memorySearch: true,
   /** Agent can persist new memory entries. */
   memoryWrite: true,
+  /** Agent supports user-facing memory search, confirm, forget, and status. */
+  memoryControl: true,
   /** Agent can run scheduled reflection cycles. */
   reflection: true,
   /** Agent can evolve interest scores. */

@@ -70,14 +70,14 @@ processAgent(prompt, context)
 ```text
 External service / UI
         |
-        | HTTP or MCP
+        | authenticated HTTP or MCP
         v
-Transport adapter (src/app/api/*)
+Transport adapter (src/app/api/*, src/auth, src/transport)
         |
         v
 processAgent (src/agent/core.ts)
         |
-        +-- policy / context validation / rate limit
+        +-- policy / context validation / identity-scoped rate limit
         +-- personality and prompt construction
         +-- memory retrieval and persistence
         +-- vault and cross-service identity
@@ -92,7 +92,9 @@ PostgreSQL + pgvector
 
 ```text
 src/agent/          core runtime, types, version, fixed personality
-src/memory/         four-namespace memory, embeddings, extraction, secret scan
+src/auth/           HMAC service authentication and scopes
+src/memory/         four-namespace memory, lifecycle, retrieval, extraction
+src/transport/      shared transport schemas and HTTP helpers
 src/vault/          user vaults, files, profiles, identity links
 src/policy/         context validation, access control, rate limiting
 src/reflection/     reflection cycle and diary
@@ -116,16 +118,33 @@ src/app/dashboard/  operator UI
 - `POST /api/agent`
 - Вход: `{ prompt, context, attachments? }`.
 - Выход: `AgentResult`.
-- Версия контракта агента: `1.0.0` в `src/agent/version.ts`.
+- Версия контракта агента: `2.0.0` в `src/agent/version.ts`.
+- Web-транспорты требуют HMAC-заголовки `X-Agent-Service`,
+  `X-Agent-Timestamp`, `X-Agent-Signature`, когда задан
+  `AGENT_SERVICE_CREDENTIALS`.
+- Публичный контекст не может доверенно задавать `globalUserId`, `vaultId`
+  или identity links; эти поля являются runtime/trusted-only.
 
 ### Web MCP endpoint
 
 - `POST /api/mcp`
-- Tools: `agent_message`, `agent_search`, `agent_info`.
+- Tools: `agent_message`, `agent_search`, `agent_info`,
+  `agent_memory_search`, `agent_memory_forget`, `agent_memory_confirm`,
+  `agent_memory_status`.
 - Реализация использует официальный `WebStandardStreamableHTTPServerTransport`
   SDK в stateless-режиме, подходящем для Vercel serverless functions.
-- Не путайте версию контракта агента `1.0.0` с версией MCP protocol: MCP
+- Не путайте версию контракта агента `2.0.0` с версией MCP protocol: MCP
   protocol version согласовывается SDK отдельно.
+
+### Memory control API
+
+- `POST /api/memory/search`
+- `POST /api/memory/forget`
+- `POST /api/memory/confirm`
+- `POST /api/memory/status`
+
+Все endpoint’ы используют один и тот же authenticated `AgentContext`;
+запись требует scope `memory:write` и `memoryAccess.write = true`.
 
 ### Standalone MCP
 
@@ -159,12 +178,18 @@ src/app/dashboard/  operator UI
 - смешивать данные пользователей, пространств или сервисов;
 - обходить `canAccessMemory` ради удобства;
 - сохранять память при `memoryAccess.write = false`.
+- искать или записывать user-память без resolved `vaultId`.
+
+User-память относится к vault человека, а не к raw `userId`. Локальный
+`serviceId + userId` сохраняется как provenance.
 
 ### Identity и vault
 
 - Локальная личность определяется парой `serviceId + userId`.
-- `globalUserId` связывает одного человека между сервисами.
+- Новая глобальная личность создаётся как `serviceId:userId`.
 - `vault_identity_links` хранит cross-service связи.
+- Одинаковые `userId` в разных сервисах не являются одним человеком без
+  явной identity link.
 - Не объединяйте личности эвристически. Связь должна быть явно передана или
   найдена в таблице identity links.
 
@@ -174,6 +199,8 @@ src/app/dashboard/  operator UI
 - Любая сохраняемая память проходит secret scan.
 - `AgentResult.text` считается недоверенным при HTML-рендеринге.
 - Публичные вызовы проходят policy validation и per-service rate limit.
+- Публичные вызовы проходят HMAC service auth и identity-scoped rate limit.
+- `identityLinks` принимаются только от сервиса со scope `identity:link`.
 - Ошибки API не должны раскрывать secrets, SQL или содержимое чужой памяти.
 
 ### Векторные embeddings
@@ -203,6 +230,11 @@ src/app/dashboard/  operator UI
   ошибке flush.
 - Memory extraction: explicit и automatic memory flows разделены; сохраняйте
   это различие при изменениях.
+- Memory lifecycle: записи имеют `memory_type`, `status`, `confidence`,
+  `source_type`, `last_confirmed_at`, `valid_until`, `superseded_by`;
+  deleted/superseded записи исключаются из retrieval, но сохраняют audit trail.
+- User retrieval: profile summary → facts/summaries → episodes; используется
+  hybrid ranking по embedding, full-text, importance и recency.
 
 ## 8. База данных
 
@@ -241,6 +273,7 @@ GROQ_API_KEY=...
 
 OLLAMA_URL=http://localhost:11434/v1
 OLLAMA_EMBED_MODEL=nomic-embed-text:latest
+AGENT_SERVICE_CREDENTIALS={"service":{"secretBase64":"...","scopes":["agent:message"]}}
 ```
 
 Дополнительные/planned значения перечислены в `.env.example`. Не считайте
@@ -301,7 +334,7 @@ pnpm db:studio        # Drizzle Studio
 | Изменение | Обязательная проверка |
 |---|---|
 | Agent core / types | unit tests, lint, build, оба transport call site |
-| Memory / policy | isolation tests, write-forbidden path, secret scan |
+| Memory / policy | isolation tests, write-forbidden path, secret scan, lifecycle |
 | DB schema | migration, affected queries, clean build |
 | MCP | initialize, tools/list, tools/call, error path, реальный MCP client |
 | HTTP route | valid request, invalid context, rate limit, internal error |

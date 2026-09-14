@@ -19,10 +19,10 @@ interface EnsureUserVaultOptions {
 /**
  * Resolve the global user identifier for a `(serviceId, userId)` pair.
  *
- * 1. If the caller already passed a `globalUserId`, trust it.
- * 2. Otherwise look up the identity link table.
- * 3. Otherwise fall back to `userId` so legacy single-service callers
- *    keep working.
+ * 1. Look up the identity link table.
+ * 2. Return the linked vault’s stable `globalUserId`.
+ * 3. Return null for an unknown local identity; callers should use
+ *    `resolveUserVault` to create a namespaced identity.
  *
  * Returns `null` if there is no `userId` to resolve at all.
  */
@@ -39,8 +39,39 @@ export async function resolveGlobalUserId(
       eq(vaultIdentityLinks.externalUserId, userId),
     ),
   });
-  if (link) return link.vaultId;
-  return userId;
+  if (!link) return null;
+
+  const linkedVault = await db.query.vaults.findFirst({
+    where: eq(vaults.id, link.vaultId),
+  });
+  return linkedVault?.globalUserId ?? null;
+}
+
+export async function resolveUserVault(
+  serviceId: string,
+  userId: string,
+  options: EnsureUserVaultOptions = {},
+): Promise<UserVaultSession> {
+  const link = await db.query.vaultIdentityLinks.findFirst({
+    where: and(
+      eq(vaultIdentityLinks.serviceId, serviceId),
+      eq(vaultIdentityLinks.externalUserId, userId),
+    ),
+  });
+
+  if (link) {
+    const linkedVault = await db.query.vaults.findFirst({
+      where: eq(vaults.id, link.vaultId),
+    });
+    if (!linkedVault) {
+      throw new Error(`Identity link points to missing vault ${link.vaultId}`);
+    }
+
+    return ensureUserVault(linkedVault.globalUserId, options);
+  }
+
+  const globalUserId = `${serviceId}:${userId}`;
+  return ensureUserVault(globalUserId, options);
 }
 
 /**
@@ -289,7 +320,7 @@ export async function upsertVaultProfile(input: {
       .set({
         title: input.title,
         summary: input.content ?? existing.summary,
-        tags: tags as any,
+        tags,
         metadata: { ...(existing.metadata ?? {}), ...(input.metadata ?? {}) },
         updatedAt: new Date(),
       })

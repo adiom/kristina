@@ -36,17 +36,17 @@ describe('policy.validateContext', () => {
   });
 
   it('rejects missing source', () => {
-    const ctx: any = { ...baseContext, source: undefined };
+    const ctx = { ...baseContext, source: undefined } as unknown as AgentContext;
     expect(() => validateContext(ctx)).toThrow(PolicyError);
   });
 
   it('rejects missing serviceId', () => {
-    const ctx: any = { ...baseContext, serviceId: '' };
+    const ctx = { ...baseContext, serviceId: '' } as AgentContext;
     expect(() => validateContext(ctx)).toThrow(PolicyError);
   });
 
   it('rejects missing memoryAccess', () => {
-    const ctx: any = { ...baseContext, memoryAccess: undefined };
+    const ctx = { ...baseContext, memoryAccess: undefined } as unknown as AgentContext;
     expect(() => validateContext(ctx)).toThrow(PolicyError);
   });
 });

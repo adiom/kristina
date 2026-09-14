@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 export default function Home() {
   const endpoints = [
     { method: "POST", path: "/api/agent", label: "agent turn" },
@@ -16,9 +18,9 @@ export default function Home() {
     <main className="min-h-screen bg-[#e8edf4] text-[#11141a]">
       <section className="mx-auto flex min-h-screen w-full max-w-7xl flex-col px-4 py-4 sm:px-6 lg:px-8">
         <nav className="flex items-center justify-between border-b border-[#11141a]/15 pb-4">
-          <a className="font-mono text-base font-bold uppercase tracking-[0.22em]" href="/">
+          <Link className="font-mono text-base font-bold uppercase tracking-[0.22em]" href="/">
             Kristina
-          </a>
+          </Link>
           <div className="flex items-center gap-2 text-sm">
             <a
               className="rounded-md border border-[#11141a]/20 px-3 py-2 text-[#3c4654] transition hover:border-[#11141a]/45 hover:text-[#11141a] focus:outline-none focus:ring-2 focus:ring-[#007e91]"
@@ -42,7 +44,7 @@ export default function Home() {
                 production
               </span>
               <span className="font-mono text-xs uppercase tracking-[0.18em] text-[#536171]">
-                protocol 1.0.0 / vercel hobby
+                protocol 2.0.0 / vercel hobby
               </span>
             </div>
             <h1 className="max-w-3xl text-5xl font-black leading-[0.92] tracking-normal text-[#11141a] sm:text-7xl lg:text-8xl">

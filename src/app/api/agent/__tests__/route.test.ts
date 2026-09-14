@@ -1,5 +1,5 @@
 jest.mock('../../../../agent/core', () => ({
-  processAgent: jest.fn(async (_prompt: string, context: any) => ({
+  processAgent: jest.fn(async (_prompt: string, context: import('../../../../agent/types').AgentContext) => ({
     text: 'ok',
     type: 'message',
     metadata: {

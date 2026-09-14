@@ -5,12 +5,14 @@ Autonomous AI agent with persistent memory, self-reflection, and personality.
 ## Features
 
 - **Persistent Memory** — Remembers all conversations and insights
-- **Four-Namespace Memory** — Agent's own knowledge, user knowledge, space knowledge, service knowledge
+- **Vault-Scoped User Memory** — Identity, lifecycle, and hybrid retrieval per person
+- **Four-Namespace Memory** — Agent's own, user, space, and service knowledge
 - **Self-Reflection** — Scheduled introspection cycles with insight extraction
 - **Interest System** — Autonomous exploration driven by evolving interests
 - **Dynamic Personality** — Traits that evolve over time (DB-backed)
 - **Transparency** — All actions logged and visible on dashboard
 - **Dual Transport** — HTTP API + MCP Streamable HTTP
+- **Service Authentication** — HMAC-signed HTTP and MCP adapters
 
 ## Tech Stack
 
@@ -47,7 +49,9 @@ pnpm dev
 kristina/
 ├── src/
 │   ├── agent/           # Agent core: processAgent, types, version, personality
-│   ├── memory/          # Memory system (4-namespace, pgvector, secret-scan)
+│   ├── auth/            # HMAC service authentication and scopes
+│   ├── memory/          # Memory system (vault identity, lifecycle, retrieval)
+│   ├── transport/       # Shared transport schemas and helpers
 │   ├── reflection/      # Self-reflection cycle
 │   ├── interests/       # Interest system (decay, growth, cross-pollinate)
 │   ├── personality/     # Dynamic traits (DB-backed)
@@ -71,7 +75,11 @@ kristina/
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/api/agent` | HTTP transport — calls processAgent |
-| POST | `/api/mcp` | MCP Streamable HTTP — tools: agent_message, agent_search, agent_info |
+| POST | `/api/mcp` | MCP Streamable HTTP — agent and memory-control tools |
+| POST | `/api/memory/search` | Search authenticated user memory |
+| POST | `/api/memory/forget` | Mark user memory deleted |
+| POST | `/api/memory/confirm` | Confirm user memory |
+| POST | `/api/memory/status` | List active user memory |
 | GET | `/api/dashboard` | Dashboard data (supports `?extended=1`) |
 
 ## Documentation
@@ -108,6 +116,9 @@ LM_STUDIO_URL=http://localhost:1234/v1
 # Embeddings (Ollama OpenAI-compatible endpoint)
 OLLAMA_URL=http://localhost:11434/v1
 OLLAMA_EMBED_MODEL=nomic-embed-text:latest
+
+# Service HMAC credentials (JSON; configure in production)
+AGENT_SERVICE_CREDENTIALS={"service":{"secretBase64":"...","scopes":["agent:message","memory:read"]}}
 ```
 
 ## License

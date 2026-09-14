@@ -25,6 +25,22 @@ export const memory = pgTable(
     userId: uuid('user_id'),
     spaceId: uuid('space_id'),
     service: text('service'),
+    memoryType: text('memory_type', {
+      enum: ['fact', 'episode', 'summary'],
+    }).notNull().default('episode'),
+    status: text('status', {
+      enum: ['active', 'superseded', 'expired', 'deleted', 'legacy_local_only'],
+    }).notNull().default('active'),
+    confidence: integer('confidence').notNull().default(70),
+    sourceType: text('source_type', {
+      enum: ['explicit', 'auto', 'agent', 'reflection', 'onboarding'],
+    }).notNull().default('auto'),
+    lastConfirmedAt: timestamp('last_confirmed_at'),
+    validUntil: timestamp('valid_until'),
+    supersededBy: uuid('superseded_by'),
+    contentHash: text('content_hash'),
+    embeddingModel: text('embedding_model'),
+    localUserId: text('local_user_id'),
     context: jsonb('context').$type<{
       channel?: string;
       emotionalTone?: string;
@@ -40,6 +56,9 @@ export const memory = pgTable(
     index('memory_service_idx').on(t.service),
     index('memory_category_idx').on(t.category),
     index('memory_created_at_idx').on(t.createdAt),
+    index('memory_status_idx').on(t.status),
+    index('memory_type_idx').on(t.memoryType),
+    index('memory_content_hash_idx').on(t.contentHash),
   ]
 );
 
@@ -170,17 +189,8 @@ export const activityLog = pgTable(
         'decision_made',
       ],
     }).notNull(),
-    context: jsonb('context').$type<{
-      channel?: string;
-      userId?: string;
-    }>(),
-    details: jsonb('details').$type<{
-      input?: string;
-      output?: string;
-      reasoning?: string;
-      memoriesAccessed?: string[];
-      confidence?: number;
-    }>(),
+    context: jsonb('context').$type<Record<string, unknown>>(),
+    details: jsonb('details').$type<Record<string, unknown>>(),
   },
   (t) => [
     index('activity_log_timestamp_idx').on(t.timestamp),

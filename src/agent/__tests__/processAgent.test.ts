@@ -1,19 +1,3 @@
-/**
- * Smoke tests for `processAgent`.
- *
- * The tests mock the LLM and the memory layer so we can exercise the
- * runtime end‑to‑end without a real database or model server.  They
- * verify the contract that external transports rely on:
- *
- *   - validateContext is called (missing fields throw)
- *   - the result has the expected `AgentResult` shape
- *   - `memoryAccess.write = false` prevents the runtime from persisting
- *     new memory, but the answer is still produced
- *
- * Run with `pnpm test`.
- */
-
-// Mock BEFORE importing the module under test.
 jest.mock('ai', () => ({
   __esModule: true,
   ToolLoopAgent: class {
@@ -22,29 +6,32 @@ jest.mock('ai', () => ({
     }
   },
   embed: jest.fn(async () => ({ embedding: new Array(768).fill(0) })),
-  tool: (def: any) => def,
+  tool: (definition: unknown) => definition,
 }));
 
 jest.mock('@ai-sdk/openai-compatible', () => {
-  const callable: any = (modelId: string) => ({ modelId });
-  callable.embeddingModel = () => ({});
+  const callable = Object.assign((modelId: string) => ({ modelId }), {
+    embeddingModel: () => ({}),
+  });
   return { createOpenAICompatible: () => callable };
 });
 
 jest.mock('@ai-sdk/groq', () => {
-  const callable: any = (modelId: string) => ({ modelId });
+  const callable = (modelId: string) => ({ modelId });
   return { createGroq: () => callable };
 });
 
 jest.mock('../../memory/store', () => ({
   searchOwnMemory: jest.fn(async () => []),
-  searchUserMemory: jest.fn(async () => []),
+  searchVaultMemory: jest.fn(async () => []),
   searchSpaceMemory: jest.fn(async () => []),
   searchServiceMemory: jest.fn(async () => []),
   storeOwnMemory: jest.fn(async () => {}),
-  storeUserMemory: jest.fn(async () => {}),
   storeSpaceMemory: jest.fn(async () => {}),
   storeServiceMemory: jest.fn(async () => {}),
+  upsertVaultMemory: jest.fn(async () => ({ stored: true, memoryId: 'memory-1' })),
+  listVaultMemories: jest.fn(async () => []),
+  forgetVaultMemory: jest.fn(async () => ({ forgotten: 1, memoryIds: ['memory-1'] })),
 }));
 
 jest.mock('../../transparency', () => ({
@@ -52,17 +39,17 @@ jest.mock('../../transparency', () => ({
 }));
 
 jest.mock('../../vault', () => ({
-  ensureUserVault: jest.fn(async (globalUserId: string) => ({
-    vaultId: 'vault-1',
-    globalUserId,
-    isNewVault: false,
-    onboardingStatus: 'completed',
-  })),
-  resolveGlobalUserId: jest.fn(
-    async (_serviceId: string | undefined, userId: string | undefined) => userId ?? null,
+  resolveUserVault: jest.fn(
+    async (serviceId: string, userId: string, options: unknown) => ({
+      vaultId: 'vault-1',
+      globalUserId: `${serviceId}:${userId}`,
+      isNewVault: false,
+      onboardingStatus: 'completed',
+      options,
+    }),
   ),
   upsertIdentityLinks: jest.fn(async () => {}),
-  upsertVaultProfile: jest.fn(async () => ({ id: 'profile-1' })),
+  getVaultProfile: jest.fn(async () => undefined),
   completeVaultOnboarding: jest.fn(async () => {}),
   registerAttachmentsAsVaultItems: jest.fn(async () => []),
 }));
@@ -99,32 +86,29 @@ describe('processAgent', () => {
     expect(result.metadata?.serviceId).toBe('test-svc');
   });
 
-  it('rejects a context that is missing required fields', async () => {
+  it('rejects an invalid context', async () => {
     await expect(
-      // @ts-expect-error testing runtime validation
+      // @ts-expect-error runtime validation
       processAgent('hello', { serviceId: 'x' }),
     ).rejects.toThrow();
   });
 
   it('does not persist memory when write is false', async () => {
     await processAgent('remember me', baseContext);
-    // The runtime only invokes store* when the result actually contains
-    // memoryToStore AND write is true.  With write=false the mocks
-    // should never have been called.
+    expect(store.upsertVaultMemory).not.toHaveBeenCalled();
     expect(store.storeOwnMemory).not.toHaveBeenCalled();
-    expect(store.storeUserMemory).not.toHaveBeenCalled();
     expect(store.storeSpaceMemory).not.toHaveBeenCalled();
     expect(store.storeServiceMemory).not.toHaveBeenCalled();
   });
 
-  it('creates or touches a vault when userId is present', async () => {
+  it('resolves a vault from serviceId and local userId', async () => {
     const result = await processAgent('hello', {
       ...baseContext,
-      userId: 'global-user-1',
+      userId: 'user-42',
       userName: 'Alice',
     });
 
-    expect(vault.ensureUserVault).toHaveBeenCalledWith('global-user-1', {
+    expect(vault.resolveUserVault).toHaveBeenCalledWith('test-svc', 'user-42', {
       displayName: 'Alice',
       serviceId: 'test-svc',
       spaceId: 'space-1',
@@ -132,93 +116,10 @@ describe('processAgent', () => {
     expect(result.metadata?.vaultId).toBe('vault-1');
   });
 
-  it('persists the current service user as the primary identity link', async () => {
+  it('persists the current identity but ignores untrusted extra links', async () => {
     await processAgent('привет', {
       ...baseContext,
       serviceId: 'telegram',
-      userId: 'tg-user-42',
-      userName: 'Alice TG',
-    });
-
-    expect(vault.upsertIdentityLinks).toHaveBeenCalledWith('vault-1', [
-      {
-        serviceId: 'telegram',
-        userId: 'tg-user-42',
-        userName: 'Alice TG',
-        primary: true,
-      },
-    ]);
-  });
-
-  it('writes the first onboarding answer into vault profile (not memory)', async () => {
-    jest.mocked(vault.ensureUserVault).mockResolvedValueOnce({
-      vaultId: 'vault-pending',
-      globalUserId: 'global-user-2',
-      isNewVault: false,
-      onboardingStatus: 'pending',
-    });
-
-    await processAgent('я занимаюсь исследованием рынков', {
-      ...baseContext,
-      userId: 'global-user-2',
-      userName: 'Anya',
-      memoryAccess: { ...baseContext.memoryAccess, user: true, write: true },
-    });
-
-    expect(vault.upsertVaultProfile).toHaveBeenCalledWith(
-      expect.objectContaining({
-        vaultId: 'vault-pending',
-        title: 'Anya',
-        content: 'я занимаюсь исследованием рынков',
-        source: 'user',
-        tags: ['onboarding'],
-      }),
-    );
-    expect(store.storeUserMemory).not.toHaveBeenCalledWith(
-      'global-user-2',
-      expect.objectContaining({ content: expect.stringContaining('First profile note') }),
-    );
-    expect(vault.completeVaultOnboarding).toHaveBeenCalledWith('vault-pending');
-  });
-
-  it('skips tiny onboarding answers and does not pollute the profile', async () => {
-    jest.mocked(vault.ensureUserVault).mockResolvedValueOnce({
-      vaultId: 'vault-pending',
-      globalUserId: 'global-user-2b',
-      isNewVault: false,
-      onboardingStatus: 'pending',
-    });
-
-    await processAgent('привет', {
-      ...baseContext,
-      userId: 'global-user-2b',
-      memoryAccess: { ...baseContext.memoryAccess, user: true, write: true },
-    });
-
-    expect(vault.upsertVaultProfile).not.toHaveBeenCalled();
-    expect(vault.completeVaultOnboarding).not.toHaveBeenCalled();
-  });
-
-  it('resolves a cross-service globalUserId via identity links', async () => {
-    jest.mocked(vault.resolveGlobalUserId).mockResolvedValueOnce('global-person-9');
-
-    const result = await processAgent('привет', {
-      ...baseContext,
-      serviceId: 'telegram',
-      userId: 'tg-user-42',
-    });
-
-    expect(vault.resolveGlobalUserId).toHaveBeenCalledWith('telegram', 'tg-user-42');
-    expect(vault.ensureUserVault).toHaveBeenCalledWith(
-      'global-person-9',
-      expect.objectContaining({ serviceId: 'telegram' }),
-    );
-    expect(result.metadata?.vaultId).toBe('vault-1');
-  });
-
-  it('persists identityLinks sent by the adapter', async () => {
-    await processAgent('привет', {
-      ...baseContext,
       userId: 'tg-user-42',
       identityLinks: [
         { serviceId: 'telegram', userId: 'tg-user-42', primary: true },
@@ -226,61 +127,154 @@ describe('processAgent', () => {
       ],
     });
 
+    expect(vault.upsertIdentityLinks).toHaveBeenCalledWith('vault-1', [
+      {
+        serviceId: 'telegram',
+        userId: 'tg-user-42',
+        primary: true,
+      },
+    ]);
+  });
+
+  it('persists trusted identity links only when runtime trust is set', async () => {
+    await processAgent('привет', {
+      ...baseContext,
+      userId: 'tg-user-42',
+      identityLinks: [{ serviceId: 'sfera', userId: 'sfera-user-7' }],
+      runtimeTrust: { allowIdentityLinks: true },
+    });
+
     expect(vault.upsertIdentityLinks).toHaveBeenCalledWith(
       'vault-1',
       expect.arrayContaining([
-        expect.objectContaining({ serviceId: 'telegram', userId: 'tg-user-42', primary: true }),
         expect.objectContaining({ serviceId: 'sfera', userId: 'sfera-user-7' }),
       ]),
     );
   });
 
-  it('registers attachments in vault and exposes them in metadata', async () => {
+  it('searches user memory by vault and reads facts plus episodes', async () => {
+    jest.mocked(store.searchVaultMemory).mockResolvedValueOnce([
+      {
+        id: 'fact-1',
+        content: 'Пользователь изучает рынки',
+        category: 'knowledge',
+        importance: 8,
+        similarity: 0.9,
+        source: 'user',
+      },
+    ] as never);
+
+    const result = await processAgent('чем я занимаюсь?', {
+      ...baseContext,
+      userId: 'user-42',
+      memoryAccess: { ...baseContext.memoryAccess, user: true },
+    });
+
+    expect(store.searchVaultMemory).toHaveBeenCalledWith(
+      'vault-1',
+      'чем я занимаюсь?',
+      expect.objectContaining({ memoryTypes: ['fact', 'summary'] }),
+    );
+    expect(store.searchVaultMemory).toHaveBeenCalledWith(
+      'vault-1',
+      'чем я занимаюсь?',
+      expect.objectContaining({ memoryTypes: ['episode'] }),
+    );
+    expect(result.sources?.[0].id).toBe('fact-1');
+  });
+
+  it('does not automatically save an onboarding answer without a durable fact', async () => {
+    jest.mocked(vault.resolveUserVault).mockResolvedValueOnce({
+      vaultId: 'vault-pending',
+      globalUserId: 'test-svc:user-42',
+      isNewVault: false,
+      onboardingStatus: 'pending',
+    });
+
+    await processAgent('я занимаюсь исследованием рынков', {
+      ...baseContext,
+      userId: 'user-42',
+      memoryAccess: { ...baseContext.memoryAccess, user: true, write: true },
+    });
+
+    expect(store.upsertVaultMemory).not.toHaveBeenCalled();
+    expect(vault.completeVaultOnboarding).not.toHaveBeenCalled();
+  });
+
+  it('handles a natural forget command through vault memory', async () => {
+    const result = await processAgent('забудь, что я люблю кофе', {
+      ...baseContext,
+      userId: 'user-42',
+      memoryAccess: { ...baseContext.memoryAccess, user: true, write: true },
+    });
+
+    expect(store.forgetVaultMemory).toHaveBeenCalledWith(
+      'vault-1',
+      'я люблю кофе',
+      { exact: false },
+    );
+    expect(result.metadata?.memoryOperation).toEqual({
+      type: 'forget',
+      forgotten: 1,
+      memoryIds: ['memory-1'],
+    });
+  });
+
+  it('returns active personal memory for a status request', async () => {
+    jest.mocked(store.listVaultMemories).mockResolvedValueOnce([
+      { id: 'memory-1', content: 'Пользователь любит кофе', category: 'knowledge', importance: 8 },
+    ] as never);
+
+    const result = await processAgent('что ты обо мне помнишь?', {
+      ...baseContext,
+      userId: 'user-42',
+      memoryAccess: { ...baseContext.memoryAccess, user: true },
+    });
+
+    expect(store.listVaultMemories).toHaveBeenCalledWith('vault-1', { limit: 50 });
+    expect(result.text).toContain('Пользователь любит кофе');
+  });
+
+  it('registers attachments in the resolved vault', async () => {
     const result = await processAgent('посмотри файл', {
       ...baseContext,
-      userId: 'global-user-3',
+      userId: 'user-42',
       attachments: [
         {
           type: 'document',
           source: 'storage',
           title: 'contract.pdf',
-          mimeType: 'application/pdf',
-          storageKey: 'vaults/global-user-3/contract.pdf',
+          storageKey: 'vaults/user-42/contract.pdf',
         },
       ],
     });
 
     expect(vault.registerAttachmentsAsVaultItems).toHaveBeenCalledWith(
       'vault-1',
-      [
-        expect.objectContaining({
-          type: 'document',
-          title: 'contract.pdf',
-        }),
-      ],
-      'global-user-3',
+      [expect.objectContaining({ title: 'contract.pdf' })],
+      'user-42',
     );
     expect(result.metadata?.attachments).toEqual([
       {
         type: 'document',
         title: 'contract.pdf',
-        storageKey: 'vaults/global-user-3/contract.pdf',
+        storageKey: 'vaults/user-42/contract.pdf',
         url: undefined,
       },
     ]);
   });
 
-  it('appends onboarding question for new vaults when model ignores it', async () => {
-    jest.mocked(vault.ensureUserVault).mockResolvedValueOnce({
+  it('appends the onboarding question for a new vault', async () => {
+    jest.mocked(vault.resolveUserVault).mockResolvedValueOnce({
       vaultId: 'vault-new',
-      globalUserId: 'global-user-4',
+      globalUserId: 'test-svc:user-42',
       isNewVault: true,
       onboardingStatus: 'pending',
     });
 
     const result = await processAgent('Поздоровайся и расскажи о себе', {
       ...baseContext,
-      userId: 'global-user-4',
+      userId: 'user-42',
     });
 
     expect(result.text).toContain('чем ты сейчас занимаешься');

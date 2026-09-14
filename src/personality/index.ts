@@ -8,6 +8,12 @@ interface TraitUpdate {
   reason: string;
 }
 
+interface TraitHistoryEntry {
+  value: number;
+  reason: string;
+  timestamp: string;
+}
+
 export async function updateTrait(update: TraitUpdate) {
   const existing = await db
     .select()
@@ -22,7 +28,7 @@ export async function updateTrait(update: TraitUpdate) {
   };
 
   if (existing.length > 0) {
-    const currentHistory = (existing[0].history as any[]) || [];
+    const currentHistory: TraitHistoryEntry[] = existing[0].history ?? [];
     const newHistory = [...currentHistory.slice(-50), historyEntry];
 
     await db
@@ -52,7 +58,7 @@ export async function getTrait(name: string) {
     ? {
         name: result[0].name,
         value: parseFloat(result[0].value),
-        history: (result[0].history as any[]) || [],
+        history: result[0].history ?? [],
       }
     : null;
 }
@@ -62,7 +68,7 @@ export async function getAllTraits() {
   return allTraits.map((t) => ({
     name: t.name,
     value: parseFloat(t.value),
-    history: (t.history as any[]) || [],
+    history: t.history ?? [],
   }));
 }
 
@@ -72,7 +78,7 @@ export async function getTraitTrend(name: string, days = 7) {
 
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
   const recentHistory = trait.history.filter(
-    (h: any) => new Date(h.timestamp) >= cutoff
+    (entry) => new Date(entry.timestamp) >= cutoff
   );
 
   if (recentHistory.length < 2) return null;

@@ -1,51 +1,75 @@
 # Adding Kristina to Your Service
 
-Kristina is an **external autonomous agent runtime** that you can attach
-to any service – a chat, a dashboard, a news site, a simulation, etc.
-All of Kristina's intelligence (personality, memory, reflection, interests,
-logging, policy) lives in **Kristina**. Your service only needs a tiny
-*adapter* that detects mentions, builds an event context, and renders the
-result.
+Kristina is an external autonomous agent runtime. Your service remains a
+thin adapter: authenticate the request, build `AgentContext`, call
+Kristina, and render `AgentResult`.
 
+## Transport and authentication
+
+| Transport | Endpoint |
+|---|---|
+| HTTP agent | `POST /api/agent` |
+| MCP Streamable HTTP | `POST /api/mcp` |
+| Memory control | `POST /api/memory/search`, `/forget`, `/confirm`, `/status` |
+| Standalone MCP | `src/mcp/server.ts` (local stdio) |
+
+Web transports require HMAC service authentication once
+`AGENT_SERVICE_CREDENTIALS` is configured. Every request must include:
+
+```http
+X-Agent-Service: news-site-xyz
+X-Agent-Timestamp: 1783180800000
+X-Agent-Signature: <hex-hmac>
 ```
-┌──────────────────┐   HTTP / MCP / WS   ┌────────────────────┐
-│   Your service   │ ───────────────────▶│     kristina       │
-│   (Sfera, news   │ ◀───────────────────│  (agent runtime)   │
-│   site, bot)     │   AgentResult JSON  └────────────────────┘
-└──────────────────┘
+
+The signature is:
+
+```text
+HMAC-SHA256(
+  serviceSecret,
+  timestamp + "\n" + serviceId + "\n" + SHA256(rawBody)
+)
 ```
 
-This document describes the two integration paths (HTTP and MCP), the
-exact request/response shapes, and a step‑by‑step guide for adding
-Kristina to a new service.
+The timestamp is Unix milliseconds and is valid for five minutes. The
+server compares signatures with `timingSafeEqual`.
 
-## 1. Integration paths
+Credentials are configured as JSON:
 
-| Transport | Endpoint | Best for |
-|-----------|----------|----------|
-| HTTP | `POST /api/agent` | Simple backends, dashboards, mobile apps |
-| MCP Streamable HTTP | `POST /api/mcp` | AI-host environments, Claude / OpenCode style clients |
-| WebSocket | (planned) | Long‑running simulations |
+```json
+{
+  "news-site-xyz": {
+    "secretBase64": "<base64-secret>",
+    "scopes": ["agent:message", "memory:read", "memory:write"]
+  }
+}
+```
 
-Both paths take the same `AgentContext` and return the same `AgentResult`
-– switch transports without changing your adapter logic.
+Scopes:
 
-## 2. The AgentContext
+- `agent:message` — call `/api/agent` or MCP `agent_message`.
+- `memory:read` — search or inspect memory.
+- `memory:write` — persist, confirm, or forget memory.
+- `identity:link` — supply trusted `identityLinks`; this scope is only for
+  operator/dashboard services.
 
-Every call to Kristina must include a structured context describing the
-event.  The minimum required fields are `source`, `serviceId`, `spaceId`,
-`trigger`, `responseMode`, and `memoryAccess`.
+Public requests cannot set `globalUserId`, `vaultId`, or trusted identity
+data. The transports strip or ignore those fields and Kristina resolves the
+vault from the authenticated `serviceId` plus `userId`.
+
+## AgentContext
 
 ```ts
 interface AgentContext {
   source: 'sfera' | 'http' | 'ws' | 'sim';
-  serviceId: string;          // identifier of your service, e.g. "news-site-xyz"
+  serviceId: string;
   serviceName?: string;
-  spaceId: string;            // conversation / space / simulation ID
+  spaceId: string;
   spaceName?: string;
   userId?: string;
   userName?: string;
-  conversationHistory?: Array<{ role: 'user'|'assistant'|'system'; author?: string; content: string }>;
+  attachments?: AgentAttachment[];
+  conversationHistory?: ConversationMessage[];
   trigger: 'mention' | 'command' | 'event' | 'system';
   responseMode: 'public' | 'private' | 'analysis' | 'action' | 'draft';
   memoryAccess: {
@@ -56,76 +80,52 @@ interface AgentContext {
     write: boolean;
   };
 }
-
-interface AgentAttachment {
-  type: 'file' | 'image' | 'document' | 'artifact';
-  source: 'storage' | 'url' | 'base64' | 'vault_item';
-  title: string;
-  mimeType?: string;
-  sizeBytes?: number;
-  storageKey?: string;
-  url?: string;
-  data?: string;
-  sha256?: string;
-  metadata?: Record<string, unknown>;
-}
 ```
 
-* **`memoryAccess`** is the isolation contract – toggle flags to tell
-  Kristina which namespaces she may read and whether she may persist new
-  knowledge.
-* **`trigger`** helps Kristina interpret why she's being called.
-* **`responseMode`** controls the tone (public reply, internal analysis,
-  a draft you intend to edit, etc.).
+`memoryAccess` is the namespace isolation contract. `userId` is local to
+`serviceId`; identical IDs in different services do not represent the same
+person unless an explicit identity link exists.
 
-## 3. The AgentResult
+For a service with `identity:link`, `identityLinks` may contain explicit
+cross-service links. Kristina never merges identities heuristically.
 
-Kristina returns a structured result.  Render `text` to the user; use
-`sources` for transparency, and `actions` to perform follow‑up tool
-calls on your side.
+## Identity and memory behavior
 
-```ts
-interface AgentResult {
-  text: string;                                      // main answer
-  type: 'message' | 'analysis' | 'question' | 'warning' | 'action' | 'observation';
-  confidence?: number;                               // 0..1
-  memoryToStore?: Array<{ content: string; category: string; importance: number; tags: string[] }>;
-  sources?: Array<{ id: string; snippet: string; similarity: number }>;
-  actions?: Array<{ tool: string; args: any }>;
-  metadata?: Record<string, unknown>;
-}
-```
+1. Kristina resolves `(serviceId, userId)` through
+   `cf_kristina_vault_identity_links`.
+2. New identities receive `globalUserId = serviceId + ":" + userId`.
+3. All user memory is keyed by the resolved `vaultId`.
+4. Retrieval reads the active vault profile, then durable facts/summaries,
+   then episodes using semantic, full-text, importance, and recency signals.
+5. Similar facts are deduplicated, confirmed, or superseded inside the same
+   vault.
+6. Deleted or superseded memories remain auditable but are excluded from
+   retrieval.
 
-## 4. HTTP example
+Users can say:
+
+- «что ты обо мне помнишь» — list active personal memories;
+- «забудь, что…» — mark a matching memory deleted;
+- «это уже не так» — mark a matching memory deleted/superseded.
+
+## HTTP request
 
 ```http
 POST /api/agent HTTP/1.1
 Content-Type: application/json
-X-Agent-Version: 1.0.0
+X-Agent-Service: news-site-xyz
+X-Agent-Timestamp: 1783180800000
+X-Agent-Signature: <hex-hmac>
+```
 
+```json
 {
-  "prompt": "@kristina собери новости опираясь на свои интересы",
-  "attachments": [
-    {
-      "type": "document",
-      "source": "storage",
-      "title": "brief.pdf",
-      "mimeType": "application/pdf",
-      "sizeBytes": 123456,
-      "storageKey": "vaults/user-42/brief.pdf"
-    }
-  ],
+  "prompt": "Собери новости по моим интересам",
   "context": {
     "source": "http",
     "serviceId": "news-site-xyz",
-    "serviceName": "DailyNews",
-    "spaceId": "article-2025-07-03",
-    "spaceName": "Обзор рынков",
+    "spaceId": "article-2026-09-14",
     "userId": "user-42",
-    "userName": "Иван",
-    "conversationHistory": [
-      { "role": "user", "author": "Иван", "content": "Какие новости важны?" }
-    ],
     "trigger": "mention",
     "responseMode": "public",
     "memoryAccess": {
@@ -139,98 +139,38 @@ X-Agent-Version: 1.0.0
 }
 ```
 
-Successful response:
+Successful responses return `AgentResult`. Render `text` as untrusted text;
+never inject it into raw HTML without sanitization.
 
-```json
-{
-  "text": "На основании ваших интересов, ...",
-  "type": "message",
-  "confidence": 0.87,
-  "sources": [
-    { "id": "...", "snippet": "...", "similarity": 0.81 }
-  ],
-  "metadata": { "model": "qwen/qwen3-1.7b", "serviceId": "news-site-xyz" }
-}
-```
+## Memory control API
 
-Errors are returned as `{ "error": { "code": "...", "message": "..." } }`
-with appropriate HTTP status codes (`400`, `403`, `429`, `500`).
+All memory endpoints use the same authenticated context body.
 
-## 5. MCP example
+- `POST /api/memory/search` — `{ query, context }`
+- `POST /api/memory/forget` — `{ query, exact?, context }`
+- `POST /api/memory/confirm` — `{ memoryId?, query?, context }`
+- `POST /api/memory/status` — `{ context }`
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "tools/call",
-  "params": {
-    "name": "agent_message",
-    "arguments": {
-      "prompt": "@kristina собери новости",
-      "context": { "...": "..." }
-    }
-  }
-}
-```
+Writes require both `memoryAccess.write: true` and the `memory:write` scope.
 
-Available tools:
+## MCP tools
 
-* **`agent_message(prompt, context)`** – run the agent.
-* **`agent_search(query, context)`** – read‑only memory search.
-* **`agent_info()`** – version + capabilities.
+- `agent_message(prompt, context)`
+- `agent_search(query, context)`
+- `agent_memory_search(query, context)`
+- `agent_memory_forget(query, exact?, context)`
+- `agent_memory_confirm(memoryId?, query?, context)`
+- `agent_memory_status(context)`
+- `agent_info()`
 
-The MCP `initialize` response negotiates a date-based MCP `protocolVersion`
-through the SDK. `serverInfo.version` remains the Kristina agent contract
-version (`1.0.0`); these versions are intentionally separate.
+The MCP SDK negotiates the MCP protocol version separately. The Kristina
+agent contract version is currently **2.0.0** and is returned by `agent_info`
+and the `X-Agent-Version` HTTP header.
 
-## 6. Step‑by‑step: adding Kristina to a new service
+## Failure modes
 
-1. **Register the service** – pick a stable `serviceId` (e.g. `news-site-xyz`).
-   This ID appears in logs and dashboards; it cannot be changed later.
-2. **Detect the trigger** – in your UI / backend, watch for the mention
-   (`@kristina`, `@kristina`, slash command, etc.) or a programmatic
-   event.
-3. **Create a placeholder** – show "Kristina is typing…" in the UI while
-   the request is in flight.
-4. **Build the context** – fill in `AgentContext`:
-   * `source` (e.g. `http`)
-   * `serviceId`, `spaceId`, `userId`, `userName`
-   * `conversationHistory` (last 3‑5 messages)
-   * `trigger` (`mention`, `command`, …)
-   * `responseMode` (`public` for visible replies, `analysis` for
-     internal notes, `draft` for human‑edited answers)
-   * `memoryAccess` (start with all `true`; flip off if you want a
-     read‑only interaction or to forbid persistence).
-5. **Call the endpoint** – `POST /api/agent` or MCP `agent_message`.
-   Files should usually be uploaded by your service to object storage first,
-   then passed to Kristina as `attachments` metadata in the same message.
-6. **Render the answer** – replace the placeholder with `result.text`.
-   Optionally show `result.sources` as "References".
-7. **Handle failures**:
-   * `429 rate_limited` – back off and retry after a few seconds.
-   * `400 write_forbidden` – you asked for `write: true` but the context
-     forbids writes; the agent will still answer, it just will not store
-     new memory.
-   * `500 internal_error` – show a friendly fallback message.
-8. **Log & observe** – the activity log already records every call; the
-   dashboard (`/dashboard?extended=1`) shows per‑service usage and
-   recent answers.
-
-## 7. Versioning
-
-* Current protocol version: **1.0.0** (see `src/agent/version.ts`).
-* The version is returned by `agent_info` (MCP) and the HTTP header
-  `X-Agent-Version`.
-* Bumping the version is a breaking change – adapters must check the
-  version and fall back gracefully on older servers.
-
-## 8. Security checklist
-
-* Never call Kristina with `memoryAccess.write = true` for an untrusted
-  service.  Start with `write: false` and opt‑in once the integration is
-  reviewed.
-* Validate the `serviceId` you send – it appears in logs and dashboards.
-* Treat `result.text` as untrusted user‑renderable text; sanitise it
-  before injecting raw HTML.
-* Respect `429 rate_limited` – the runtime protects itself with a token
-  bucket per service.
+- `400` — invalid JSON, context, prompt, query, or target.
+- `401` — missing, stale, or invalid service signature.
+- `403` — missing scope, service mismatch, or forbidden memory write.
+- `429` — rate limit exceeded for the service/user identity.
+- `500` — internal error; details are logged but not exposed.

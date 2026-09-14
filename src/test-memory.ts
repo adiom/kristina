@@ -38,19 +38,19 @@ async function main() {
   
   const results1 = await searchOwnMemory('литература');
   console.log('\nQuery "литература":');
-  results1.forEach((r: any) => {
+  results1.forEach((r) => {
     console.log(`  - ${r.content} (similarity: ${r.similarity?.toFixed(3)})`);
   });
 
   const results2 = await searchOwnMemory('нейросети');
   console.log('\nQuery "нейросети":');
-  results2.forEach((r: any) => {
+  results2.forEach((r) => {
     console.log(`  - ${r.content} (similarity: ${r.similarity?.toFixed(3)})`);
   });
 
   const results3 = await searchOwnMemory('выбор технологии');
   console.log('\nQuery "выбор технологии":');
-  results3.forEach((r: any) => {
+  results3.forEach((r) => {
     console.log(`  - ${r.content} (similarity: ${r.similarity?.toFixed(3)})`);
   });
 

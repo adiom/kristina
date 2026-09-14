@@ -1,29 +1,59 @@
-/**
- * Memory extraction module for Kristina.
- *
- * This module handles two types of memory extraction:
- * 1. Auto-memory: Automatically extracts significant facts after each response
- * 2. On-demand memory: Saves when user explicitly asks ("запомни это", "запомни")
- */
-
-import { storeOwnMemory, storeUserMemory } from './store';
+import { generateObject } from 'ai';
+import { z } from 'zod';
+import { getModel } from '../agent/model';
 import { logActivity } from '../transparency';
+import {
+  storeOwnMemory,
+  upsertVaultMemory,
+  type MemorySourceType,
+  type MemoryType,
+} from './store';
 import type { AgentContext } from '../agent/types';
 
-interface ExtractedMemory {
+export interface ExtractedMemory {
   content: string;
   category: 'insight' | 'pattern' | 'knowledge' | 'decision' | 'reflection';
   importance: number;
   tags: string[];
+  memoryType: MemoryType;
+  confidence: number;
+  sourceType: MemorySourceType;
 }
 
-/**
- * Check if user explicitly asked to remember something.
- */
+const memorySchema = z.object({
+  memories: z
+    .array(
+      z.object({
+        content: z.string().min(8).max(500),
+        category: z.enum([
+          'insight',
+          'pattern',
+          'knowledge',
+          'decision',
+          'reflection',
+        ]),
+        importance: z.number().min(1).max(10),
+        tags: z.array(z.string().min(1)).max(6).default([]),
+        memoryType: z.enum(['fact', 'episode', 'summary']),
+        confidence: z.number().min(0).max(100),
+      }),
+    )
+    .max(2),
+});
+
+const onboardingSchema = z.object({
+  fact: z
+    .object({
+      content: z.string().min(8).max(500),
+      importance: z.number().min(1).max(10),
+      confidence: z.number().min(0).max(100),
+    })
+    .nullable(),
+});
+
 export function isExplicitMemoryRequest(prompt: string): boolean {
-  const patterns = [
+  return [
     /запомни/i,
-    /запомн/i,
     /не забудь/i,
     /сохрани/i,
     /запиши/i,
@@ -31,20 +61,10 @@ export function isExplicitMemoryRequest(prompt: string): boolean {
     /remember/i,
     /save this/i,
     /keep in mind/i,
-  ];
-  return patterns.some(p => p.test(prompt));
+  ].some((pattern) => pattern.test(prompt));
 }
 
-/**
- * Extract the "what to remember" part from explicit request.
- * E.g., "запомни что я люблю кофе" -> "Пользователь любит кофе"
- */
-/**
- * Extract the "what to remember" part from explicit request.
- * E.g., "запомни что я люблю кофе" -> "Пользователь любит кофе"
- */
 export function extractExplicitContent(prompt: string): string {
-  // Remove common prefixes
   const prefixes = [
     /запомни,?\s*/i,
     /запомни это,?\s*/i,
@@ -61,302 +81,166 @@ export function extractExplicitContent(prompt: string): string {
     /keep in mind,?\s*/i,
   ];
 
-  let content = prompt;
-  for (const prefix of prefixes) {
-    content = content.replace(prefix, '');
-  }
-
-  return content.trim();
+  return prefixes.reduce((content, prefix) => content.replace(prefix, ''), prompt).trim();
 }
 
-/**
- * Auto-extract memories from a conversation turn.
- * Returns 0-2 significant memories worth saving.
- */
+export function isMemoryStatusRequest(prompt: string): boolean {
+  return /что ты (обо мне )?помнишь/i.test(prompt) || /what do you (remember|know) about me/i.test(prompt);
+}
+
+export function isForgetRequest(prompt: string): boolean {
+  return /забудь/i.test(prompt) || /forget/i.test(prompt);
+}
+
+export function isOutdatedFactRequest(prompt: string): boolean {
+  return /это уже не так/i.test(prompt) || /это больше не (так|верно)/i.test(prompt);
+}
+
+export function extractMemoryCommandContent(prompt: string): string {
+  return prompt
+    .replace(/^(забудь,?\s*что|забудь|forget that,?\s*|forget,?\s*)/i, '')
+    .replace(/^(это уже не так[:\s]*|это больше не (так|верно)[:\s]*)/i, '')
+    .trim();
+}
+
 export async function extractMemories(
   prompt: string,
   response: string,
-  context: AgentContext,
 ): Promise<ExtractedMemory[]> {
-  const memories: ExtractedMemory[] = [];
+  try {
+    const result = await generateObject({
+      model: getModel(),
+      schema: memorySchema,
+      prompt: [
+        'Extract only durable facts about the user worth remembering long-term.',
+        'Do not extract temporary emotions, secrets, speculation, or model assumptions.',
+        'Return at most two concise third-person facts.',
+        `User message: ${prompt}`,
+        `Assistant message: ${response}`,
+      ].join('\n'),
+    });
 
-  // Combine prompt and response for analysis
-  const combined = `User: ${prompt}\nAssistant: ${response}`;
-
-  // Rule 1: Extract decisions
-  const decisionPatterns = [
-    /решили?\s*(что|об|о|установить|выбрать|сделать|начать|продолжать)/i,
-    /важное решение/i,
-    /договорились/i,
-    /выбрали?\s*(что|модель|подход|стратегию)/i,
-    /цель\s*(—|:|=)\s*/i,
-    /план\s*(—|:|=)\s*/i,
-  ];
-
-  for (const pattern of decisionPatterns) {
-    if (pattern.test(combined)) {
-      memories.push({
-        content: extractDecision(prompt, response),
-        category: 'decision',
-        importance: 8,
-        tags: ['decision', 'canfly'],
-      });
-      break;
-    }
+    return result.object.memories.map((memory) => ({
+      ...memory,
+      tags: memory.tags ?? [],
+      sourceType: 'auto',
+    }));
+  } catch {
+    return [];
   }
-
-  // Rule 2: Extract user preferences (about the user)
-  const preferencePatterns = [
-    /я\s*(люблю|предпочитаю|ненавижу|хочу|не хочу|думаю|считаю)/i,
-    /мне\s*(нравится|не нравится|нужно|важно)/i,
-    /я\s*(работаю|занимаюсь|изучаю)/i,
-  ];
-
-  for (const pattern of preferencePatterns) {
-    if (pattern.test(prompt)) {
-      memories.push({
-        content: `Пользователь: ${extractPreference(prompt)}`,
-        category: 'knowledge',
-        importance: 6,
-        tags: ['user-preference'],
-      });
-      break;
-    }
-  }
-
-  // Rule 3: Extract project facts (Canfly-specific)
-  const projectPatterns = [
-    /canfly/i,
-    /комикс/i,
-    /издательств/i,
-    /проект/i,
-    /бизнес/i,
-    /деньги|долг|бюджет|прибыл/i,
-  ];
-
-  for (const pattern of projectPatterns) {
-    if (pattern.test(combined)) {
-      memories.push({
-        content: extractProjectFact(prompt, response),
-        category: 'knowledge',
-        importance: 7,
-        tags: ['canfly', 'project'],
-      });
-      break;
-    }
-  }
-
-  // Rule 4: Extract insights (patterns across conversations)
-  const insightPatterns = [
-    /всегда\s*(говорит|делает|использует|предпочитает)/i,
-    /никогда\s*(не\s*)?(говорит|делает|использует)/i,
-    /обычно\s*(говорит|делает|использует)/i,
-    /каждый раз/i,
-    /по привычке/i,
-  ];
-
-  for (const pattern of insightPatterns) {
-    if (pattern.test(combined)) {
-      memories.push({
-        content: extractInsight(prompt, response),
-        category: 'pattern',
-        importance: 6,
-        tags: ['pattern', 'user-behavior'],
-      });
-      break;
-    }
-  }
-
-  // Deduplicate and limit
-  const unique = deduplicateMemories(memories);
-  return unique.slice(0, 2); // Max 2 memories per turn
 }
 
-/**
- * Persist auto-extracted memories to the database.
- */
+export async function extractOnboardingMemory(
+  prompt: string,
+): Promise<ExtractedMemory | null> {
+  try {
+    const result = await generateObject({
+      model: getModel(),
+      schema: onboardingSchema,
+      prompt: [
+        'Does this onboarding answer contain one durable fact about the person?',
+        'Return null for small talk, secrets, or temporary states.',
+        `Answer: ${prompt}`,
+      ].join('\n'),
+    });
+    if (!result.object.fact) return null;
+    return {
+      content: result.object.fact.content,
+      category: 'knowledge',
+      importance: result.object.fact.importance,
+      tags: ['onboarding'],
+      memoryType: 'fact',
+      confidence: result.object.fact.confidence,
+      sourceType: 'onboarding',
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function persistAutoMemories(
   memories: ExtractedMemory[],
   context: AgentContext,
 ): Promise<void> {
-  for (const mem of memories) {
+  if (!context.memoryAccess.write || !context.userId || !context.vaultId) return;
+
+  for (const memory of memories) {
     try {
-      // Check for duplicates in DB before saving
-      const { searchOwnMemory } = await import('./store');
-      const existing = await searchOwnMemory(mem.content, { limit: 1 });
-
-      if (existing.length > 0 && existing[0].similarity > 0.9) {
-        // Too similar to existing memory, skip
-        continue;
-      }
-
-      if (context.userId) {
-        await storeUserMemory(context.userId, {
-          content: mem.content,
-          category: mem.category,
-          importance: mem.importance,
-          tags: mem.tags,
-          vaultId: context.vaultId,
+      const result = await upsertVaultMemory(
+        context.vaultId,
+        {
+          content: memory.content,
+          category: memory.category,
+          importance: memory.importance,
+          tags: memory.tags,
+          memoryType: memory.memoryType,
+          confidence: memory.confidence,
+          sourceType: memory.sourceType,
           spaceId: context.spaceId,
           service: context.serviceId,
-        });
-      } else {
-        await storeOwnMemory({
-          content: mem.content,
-          category: mem.category,
-          importance: mem.importance,
-          tags: mem.tags,
-          spaceId: context.spaceId,
-          service: context.serviceId,
-        });
-      }
+        },
+        context.userId,
+      );
 
       await logActivity({
         type: 'memory_stored',
         channel: context.source,
         details: {
-          category: mem.category,
-          importance: mem.importance,
-          tags: mem.tags,
-          contentLength: mem.content.length,
+          category: memory.category,
+          importance: memory.importance,
+          tags: memory.tags,
+          contentLength: memory.content.length,
           source: 'auto-extraction',
+          stored: result.stored,
+          superseded: result.superseded ?? false,
         },
       });
     } catch (err) {
-      console.error('[extractMemories] Failed to persist memory:', err);
+      console.error('[persistAutoMemories] Failed:', err);
     }
   }
 }
 
-/**
- * Persist explicitly requested memory.
- */
 export async function persistExplicitMemory(
   content: string,
   context: AgentContext,
 ): Promise<boolean> {
+  if (!context.memoryAccess.write) return false;
+
   try {
-    const { searchOwnMemory } = await import('./store');
-    const existing = await searchOwnMemory(content, { limit: 1 });
-
-    if (existing.length > 0 && existing[0].similarity > 0.95) {
-      return false; // Already exists
+    if (context.userId && context.vaultId) {
+      const result = await upsertVaultMemory(
+        context.vaultId,
+        {
+          content,
+          category: 'knowledge',
+          importance: 9,
+          tags: ['explicit', 'user-request'],
+          memoryType: 'fact',
+          confidence: 95,
+          sourceType: 'explicit',
+          spaceId: context.spaceId,
+          service: context.serviceId,
+        },
+        context.userId,
+      );
+      return result.stored || Boolean(result.confirmed);
     }
 
-    if (context.userId) {
-      await storeUserMemory(context.userId, {
-        content,
-        category: 'knowledge',
-        importance: 9, // High importance for explicit requests
-        tags: ['explicit', 'user-request'],
-        vaultId: context.vaultId,
-        spaceId: context.spaceId,
-        service: context.serviceId,
-      });
-    } else {
-      await storeOwnMemory({
-        content,
-        category: 'knowledge',
-        importance: 9,
-        tags: ['explicit', 'user-request'],
-        spaceId: context.spaceId,
-        service: context.serviceId,
-      });
-    }
-
-    await logActivity({
-      type: 'memory_stored',
-      channel: context.source,
-      details: {
-        category: 'knowledge',
-        importance: 9,
-        tags: ['explicit', 'user-request'],
-        contentLength: content.length,
-        source: 'explicit-request',
-      },
+    await storeOwnMemory({
+      content,
+      category: 'knowledge',
+      importance: 9,
+      tags: ['explicit', 'user-request'],
+      memoryType: 'fact',
+      confidence: 95,
+      sourceType: 'explicit',
+      spaceId: context.spaceId,
+      service: context.serviceId,
     });
-
     return true;
   } catch (err) {
-    console.error('[persistExplicitMemory] Failed to persist memory:', err);
+    console.error('[persistExplicitMemory] Failed:', err);
     return false;
   }
-}
-
-/* ------------------------------------------------------------------ */
-/* Helper functions for content extraction                             */
-/* ------------------------------------------------------------------ */
-
-function extractDecision(prompt: string, response: string): string {
-  // Try to find the decision in the response
-  const patterns = [
-    /решили?\s*(что\s*)?(.+)/i,
-    /важное решение[:\s]+(.+)/i,
-    /выбрали?\s*(что\s*)?(.+)/i,
-    /цель[:\s]+(.+)/i,
-  ];
-
-  for (const p of patterns) {
-    const m = response.match(p);
-    if (m) return m[1].trim();
-  }
-
-  // Fallback: use first sentence of response
-  const sentences = response.split(/[.!?]/).filter(s => s.trim().length > 10);
-  return sentences[0]?.trim() || response.slice(0, 200);
-}
-
-function extractPreference(prompt: string): string {
-  const patterns = [
-    /я\s*(люблю|предпочитаю|ненавижу|хочу|не хочу|думаю|считаю)\s+(.+)/i,
-    /мне\s*(нравится|не нравится|нужно|важно)\s+(.+)/i,
-    /я\s*(работаю|занимаюсь|изучаю)\s+(.+?)(\s+и\s+|\s*$)/i,
-  ];
-
-  for (const p of patterns) {
-    const m = prompt.match(p);
-    if (m) return m[0].trim();
-  }
-
-  return prompt.slice(0, 200);
-}
-
-function extractProjectFact(prompt: string, response: string): string {
-  const combined = `${prompt} ${response}`;
-  const patterns = [
-    /canfly\s+(.+)/i,
-    /(комикс|издательств|проект)\s+(.+)/i,
-    /(деньги|долг|бюджет|прибыл)\s+(.+)/i,
-  ];
-
-  for (const p of patterns) {
-    const m = combined.match(p);
-    if (m) return m[0].trim();
-  }
-
-  return combined.slice(0, 200);
-}
-
-function extractInsight(prompt: string, response: string): string {
-  const combined = `${prompt} ${response}`;
-  const patterns = [
-    /(всегда|никогда|обычно|каждый раз|по привычке)\s+(.+)/i,
-  ];
-
-  for (const p of patterns) {
-    const m = combined.match(p);
-    if (m) return m[0].trim();
-  }
-
-  return combined.slice(0, 200);
-}
-
-function deduplicateMemories(memories: ExtractedMemory[]): ExtractedMemory[] {
-  const seen = new Set<string>();
-  return memories.filter(m => {
-    const key = m.content.toLowerCase().slice(0, 50);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
 }

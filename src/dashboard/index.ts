@@ -76,7 +76,7 @@ export interface ExtendedDashboard {
   recentResults: Array<{
     type: string;
     timestamp: Date;
-    context: any;
+    context: Record<string, unknown> | null;
   }>;
 }
 
@@ -139,4 +139,3 @@ export async function getExtendedDashboard(): Promise<ExtendedDashboard> {
     })),
   };
 }
-

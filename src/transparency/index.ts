@@ -3,10 +3,19 @@ import { activityLog } from '../db/schema';
 import { eq, gte, and, desc } from 'drizzle-orm';
 
 export interface ActivityEvent {
-  type: string;
+  type:
+    | 'message_received'
+    | 'message_sent'
+    | 'memory_stored'
+    | 'memory_searched'
+    | 'reflection_started'
+    | 'reflection_completed'
+    | 'interest_generated'
+    | 'interest_evolved'
+    | 'decision_made';
   channel?: string;
-  details?: Record<string, any>;
-  context?: { channel?: string; userId?: string };
+  details?: Record<string, unknown>;
+  context?: Record<string, unknown>;
 }
 
 let activityBuffer: ActivityEvent[] = [];
@@ -36,10 +45,10 @@ async function flushActivities() {
 
   try {
     await db.insert(activityLog).values(
-      events.map((e) => ({
-        type: e.type as any,
-        details: e.details as any,
-        context: { channel: e.channel, ...e.context } as any,
+      events.map((event) => ({
+        type: event.type,
+        details: event.details ?? {},
+        context: { channel: event.channel, ...event.context },
       }))
     );
   } catch (err) {
@@ -50,7 +59,7 @@ async function flushActivities() {
 
 export async function getActivityLog(
   filters?: {
-    type?: string;
+    type?: ActivityEvent['type'];
     since?: Date;
     limit?: number;
   }
@@ -58,7 +67,7 @@ export async function getActivityLog(
   const conditions = [];
 
   if (filters?.type) {
-    conditions.push(eq(activityLog.type, filters.type as any));
+    conditions.push(eq(activityLog.type, filters.type));
   }
   if (filters?.since) {
     conditions.push(gte(activityLog.timestamp, filters.since));
@@ -103,8 +112,8 @@ export async function getStats(period: 'hour' | 'day' | 'week' = 'day') {
 
   for (const log of logs) {
     stats.byType[log.type] = (stats.byType[log.type] || 0) + 1;
-    const channel = (log.context as any)?.channel;
-    if (channel) {
+    const channel = log.context?.channel;
+    if (typeof channel === 'string') {
       stats.byChannel[channel] = (stats.byChannel[channel] || 0) + 1;
     }
   }

@@ -49,10 +49,11 @@ const result: AgentResult = await processAgent(prompt, context);
 ```
 
 The runtime is transport-agnostic — HTTP (`/api/agent`) and MCP
-(`/api/mcp`) both delegate to it. It:
+(`/api/mcp`) both delegate to it after transport authentication. It:
 * validates the request via the policy layer,
+* resolves `(serviceId, userId)` to a personal vault,
 * retrieves memory from the allowed namespaces (`own`, `user`, `space`,
-  `service`),
+  `service`) with vault-scoped user isolation,
 * builds a system prompt from the personality + event context,
 * runs the LLM via `ToolLoopAgent`,
 * logs the lifecycle in `activity_log`,
@@ -89,14 +90,15 @@ interface AgentContext {
 **Key Behavior**:
 - Each call gets its own context
 - Memory access controlled via `memoryAccess` flags
+- User identity is local to `serviceId`; explicit links map it to one vault
 - Economic simulations get read-only memory access to prevent contamination
 
 ### 2. Memory Store
-**Purpose**: Persistent memory with vector search.
+**Purpose**: Persistent memory with hybrid retrieval and lifecycle management.
 
 **Four-Namespace Design**:
 - `userId = NULL` — Agent's own knowledge (insights, patterns, market analysis)
-- `userId = <id>` — Knowledge about specific people (preferences, topics, style)
+- `vaultId = <id>` — Knowledge about specific people (preferences, topics, style)
 - `spaceId = <id>` — Knowledge scoped to conversation space
 - `service = <id>` — Knowledge about external services
 
@@ -107,7 +109,9 @@ interface AgentContext {
 - `decision` — Decisions made and reasoning
 - `reflection` — Reflection session outputs
 
-**Search**: Vector similarity via pgvector (`1 - (embedding <=> query)`)
+**Search**: Hybrid ranking using pgvector similarity, full-text matching,
+importance, and recency. Active facts and summaries are retrieved before
+episodes; superseded, deleted, expired, and legacy-local-only rows are excluded.
 
 **Secret Scanning**: 8 regex patterns scan for API keys, passwords, private keys, env variables before storage.
 

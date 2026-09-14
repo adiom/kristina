@@ -79,24 +79,21 @@ export interface AgentContext {
   userId?: string;
   userName?: string;
   /**
-   * Cross-service stable identifier of the person behind `userId`.  When
-   * the dashboard links a Telegram account to a Sfera account, the
-   * `globalUserId` of the existing vault is reused here so the two
-   * identities share one vault.  If omitted, the runtime resolves the
-   * global id from the `vault_identity_links` table, falling back to
-   * `userId` so legacy single-service callers keep working.
+   * Runtime-resolved cross-service identity. Public transports must not
+   * supply this field; Kristina derives it from authenticated identity data.
    */
   globalUserId?: string;
   /**
-   * Optional list of linked service identities that should be associated
-   * with the resolved vault.  Used by the dashboard linking flow and by
-   * adapters that already know about cross-service links.  The runtime
-   * upserts them as `vault_identity_links` and updates `vaults.displayName`
-   * when a previously unknown name is seen.
+   * Trusted-only identity links. Public transports strip this field; only
+   * a service with the `identity:link` scope may provide it.
    */
   identityLinks?: AgentIdentityLink[];
-  /** Runtime-created personal vault ID for this user. */
+  /** Runtime-created personal vault ID. Public transports must not supply it. */
   vaultId?: string;
+  /** Internal trust flags set by an authenticated transport. */
+  runtimeTrust?: {
+    allowIdentityLinks?: boolean;
+  };
   /** Files or artifacts supplied with the current message. */
   attachments?: AgentAttachment[];
   /** Last few messages for situational awareness. */
